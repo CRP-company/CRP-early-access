@@ -1,0 +1,9 @@
+# Google Wallet service account credentials
+crp-tester-card-4af9e80eb67f.json
+
+# Node
+node_modules/
+
+# Environment variables
+.env
+.env.*

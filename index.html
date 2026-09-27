@@ -5,7 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>CRP · Early Access</title>
   <!-- Google Fonts: Inter & Space Grotesk -->
-  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bitcount+Single:wght@100..900&family=Doto:wght@400..900&family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=check_circle" />
   <style>
     * {
       margin: 0;
@@ -61,6 +64,7 @@
     .logo-marker {
       margin-bottom: 3rem;
     }
+
     .logo-simple {
       display: inline-block;
       font-family: 'Space Grotesk', monospace;
@@ -75,8 +79,8 @@
     }
 
     h1 {
-      font-family: 'Space Grotesk', sans-serif;
-      font-weight: 500;
+      font-family: "Bitcount Single", system-ui;
+      font-weight: 400;
       font-size: 4.2rem;
       letter-spacing: -0.02em;
       color: #000000;
@@ -86,7 +90,7 @@
 
     .subtitle {
       font-family: 'Space Grotesk', sans-serif;
-      font-weight: 400;
+      font-weight: 300;
       font-size: 1.5rem;
       color: #2e2e2e;
       margin-bottom: 1rem;
@@ -293,7 +297,131 @@
       border-top: 1px solid #f0f0f0;
     }
 
+    /* what we expect from you */
+    .expect-section {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+      margin-bottom: 5rem;
+    }
+    .expect-section h2 {
+      grid-column: 1 / -1;
+      font-family: 'Doto', 'Bitcount Single', system-ui;
+      font-weight: 500;
+      font-size: clamp(1.6rem, 3.6vw, 2.6rem);
+      line-height: 1.15;
+      color: #000000;
+      margin-bottom: 1.25rem;
+    }
+    .expectation {
+      position: relative;
+      background: #f1f1f1;
+      border-radius: 36px;
+      padding: 3.5rem 1.75rem 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 1.5rem;
+      transition: background 0.2s ease;
+    }
+    .expect-icon {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      font-family: 'Material Symbols Outlined';
+      font-size: 1.35rem;
+      font-weight: 400;
+      font-style: normal;
+      line-height: 1;
+      letter-spacing: normal;
+      text-transform: none;
+      display: inline-flex;
+      white-space: nowrap;
+      word-wrap: normal;
+      direction: ltr;
+      color: #439d58;
+      border-radius: 50%;
+      width: 2.5rem;
+      height: 2.5rem;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .expectation h3 {
+      font-family: 'Doto', 'Bitcount Single', system-ui;
+      font-weight: 500;
+      font-size: clamp(1rem, 2vw, 1.35rem);
+      letter-spacing: 0.02em;
+      line-height: 1.2;
+      color: #000000;
+      text-transform: uppercase;
+    }
+    .expectation p {
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: #3d3d3d;
+      max-width: 30ch;
+    }
+
+    /* what do testers get — numbered outlined cards, left aligned */
+    .perks-section {
+      margin-bottom: 5rem;
+    }
+    .perks-section h2 {
+      font-family: 'Doto', 'Bitcount Single', system-ui;
+      font-weight: 500;
+      font-size: clamp(1.6rem, 3.6vw, 2.6rem);
+      line-height: 1.15;
+      color: #000000;
+      margin-bottom: 1.25rem;
+    }
+    .perks-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+    .perk {
+      background: #f1f1f1;
+      border-radius: 28px;
+      padding: 2.25rem 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      text-align: left;
+      gap: 0.85rem;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .perk-num {
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 500;
+      font-size: 1.1rem;
+      line-height: 1;
+      color: #b4b4b4;
+    }
+    .perk h3 {
+      font-family: 'Bitcount Single', system-ui;
+      font-weight: 400;
+      font-size: 1.15rem;
+      letter-spacing: 0.06em;
+      line-height: 1.25;
+      color: #000000;
+      text-transform: uppercase;
+    }
+    .perk p {
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: #4a4a4a;
+      max-width: 40ch;
+    }
+
     @media (max-width: 880px) {
+      .perks-grid {
+        grid-template-columns: 1fr;
+      }
       .container {
         padding: 2rem 1.5rem;
       }
@@ -322,6 +450,12 @@
       h1 {
         font-size: 2.5rem;
       }
+      .expect-section {
+        grid-template-columns: 1fr;
+      }
+      .expectation {
+        padding: 2.25rem 1.5rem;
+      }
       .logo-item img {
         width: 80px;
         height: 80px;
@@ -339,9 +473,9 @@
       <span class="logo-simple">CRP</span>
     </div>
     <h1>early access</h1>
-    <div class="subtitle">Join the development process and try all the features before everyone else</div>
+    <div class="subtitle">Join the development process</div>
     <div class="description">
-      Join the early access program to receive beta features, experimental tools, and priority product updates — before they reach the public release.
+      Join the early access program to receive beta features, experimental tools, and priority product updates
     </div>
 
     <!-- Formspree signup form with consent checkbox -->
@@ -370,46 +504,58 @@
     </form>
   </div>
 
+  <!-- What we expect from you -->
+  <div class="expect-section">
+    <h2>What we expect from you</h2>
+    <div class="expectation">
+      <span class="expect-icon" aria-hidden="true">check_circle</span>
+      <h3>STAY ACTIVE</h3>
+      <p>Tester status is based on participation. Extended inactivity may cause your tester status and benefits to become inactive.</p>
+    </div>
+    <div class="expectation">
+      <span class="expect-icon" aria-hidden="true">check_circle</span>
+      <h3>GIVE FEEDBACK</h3>
+      <p>Share useful feedback when we ask for it.</p>
+    </div>
+    <div class="expectation">
+      <span class="expect-icon" aria-hidden="true">check_circle</span>
+      <h3>USE IT</h3>
+      <p>Actually use the products you receive.</p>
+    </div>
+  </div>
+
+  <!-- What do testers get -->
+  <div class="perks-section">
+    <h2>What do testers get?</h2>
+    <div class="perks-grid">
+      <div class="perk">
+        <span class="perk-num" aria-hidden="true">01</span>
+        <h3>Tester card</h3>
+        <p>Accepted testers receive a unique digital CRP Tester Card.</p>
+      </div>
+      <div class="perk">
+        <span class="perk-num" aria-hidden="true">02</span>
+        <h3>Early access</h3>
+        <p>Get features and prototypes before release</p>
+      </div>
+      <div class="perk">
+        <span class="perk-num" aria-hidden="true">03</span>
+        <h3>Tester pricing</h3>
+        <p>Access exclusive discounts on selected CRP products.</p>
+      </div>
+      <div class="perk">
+        <span class="perk-num" aria-hidden="true">04</span>
+        <h3>Direct influence</h3>
+        <p>Your feedback can influence what we build and how we build it.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Image section -->
   <div class="image-section">
     <div class="image-block">
       <img src="https://www.image2url.com/r2/default/images/1776869274976-74e932ff-18d5-462e-885b-c6ed42d42bcf.png"
            alt="CRP early access preview">
-    </div>
-  </div>
-
-  <!-- Feature cards -->
-  <div class="features-section">
-    <div class="features-grid">
-      <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L15 8.5L22 9.5L17 14L18.5 21L12 17.5L5.5 21L7 14L2 9.5L9 8.5L12 2Z" />
-          </svg>
-        </div>
-        <h3>Early feature access</h3>
-        <p>Get exclusive access to features before they are released. Influence development and try cutting-edge tools.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M20 12V8H4V12M20 12L12 20L4 12M20 12H4" />
-            <path d="M12 4V8M12 16V20" />
-            <circle cx="12" cy="12" r="2" />
-          </svg>
-        </div>
-        <h3>Experimental updates</h3>
-        <p>Receive early experimental builds, provide feedback, and help us refine the next generation of CRP Focus.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" fill="none">
-            <path d="M22 6L12 13L2 6M22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6L12 13L22 6Z" />
-          </svg>
-        </div>
-        <h3>Direct updates</h3>
-        <p>Get product news, changelogs, and insider updates directly from the team — no noise, just what matters.</p>
-      </div>
     </div>
   </div>
 
