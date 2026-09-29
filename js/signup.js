@@ -16,10 +16,8 @@ import {
   getFirestore,
   connectFirestoreEmulator,
   collection,
-  addDoc,
   doc,
-  getDoc,
-  setDoc,
+  runTransaction,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
@@ -31,6 +29,7 @@ const consentCheck = document.getElementById("consentCheckbox");
 const messageDiv = document.getElementById("formMessage");
 const emailInput = form.elements.email;
 const nameInput = form.elements.name;
+const experienceInputs = form.elements.experienceCategory;
 const websiteInput = form.elements.website;
 
 /**
@@ -119,12 +118,20 @@ if (isConfigured) {
   }
 }
 
-/** Join button is gated on the consent checkbox. */
+/** Join button is gated on consent and the required experience choice. */
 function syncSubmitState() {
   joinBtn.disabled =
-    !isConfigured || !consentCheck.checked || form.dataset.submitting === "true";
+    !isConfigured ||
+    !consentCheck.checked ||
+    !experienceInputs.value ||
+    form.dataset.submitting === "true";
 }
 consentCheck.addEventListener("change", syncSubmitState);
+form.addEventListener("change", (event) => {
+  if (event.target === experienceInputs[0] || event.target.name === "experienceCategory") {
+    syncSubmitState();
+  }
+});
 
 function showMessage(text, isError = false) {
   messageDiv.textContent = text;
@@ -144,6 +151,8 @@ async function hashEmail(email) {
     .join("");
 }
 
+class DuplicateApplicationError extends Error {}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -161,11 +170,18 @@ form.addEventListener("submit", async (event) => {
 
   const name = nameInput.value.trim();
   const email = emailInput.value.trim().toLowerCase();
+  const experienceCategory = experienceInputs.value;
 
   if (!name || !email) {
     showMessage("Please fill in your name and email address.", true);
     return;
   }
+  if (!experienceCategory) {
+    experienceInputs[0].reportValidity();
+    showMessage("Please select which best describes you.", true);
+    return;
+  }
+  if (!form.reportValidity()) return;
 
   form.dataset.submitting = "true";
   joinBtn.textContent = "Sending…";
@@ -173,39 +189,32 @@ form.addEventListener("submit", async (event) => {
   syncSubmitState();
 
   try {
-    // Check for an existing application first. This is a `get` on a doc whose
-    // body holds only an id and a timestamp, so nothing personal is exposed.
     const emailKey = await hashEmail(email);
-    const existing = await getDoc(doc(db, "requestEmails", emailKey));
+    const requestRef = doc(collection(db, "requests"));
+    const markerRef = doc(db, "requestEmails", emailKey);
+    await runTransaction(db, async (transaction) => {
+      const existing = await transaction.get(markerRef);
+      if (existing.exists()) throw new DuplicateApplicationError();
 
-    if (existing.exists()) {
-      form.reset();
-      showMessage("You have already applied — we have your request on file.");
-      return;
-    }
-
-    const requestRef = await addDoc(collection(db, "requests"), {
-      name,
-      email,
-      consent: true,
-      status: "pending",
-      source: "early-access-site",
-      userAgent: (navigator.userAgent || "").slice(0, 300),
-      website: "",
-      // serverTimestamp() resolves to the commit time, which is what the
-      // `createdAt == request.time` rule checks.
-      createdAt: serverTimestamp(),
+      transaction.set(requestRef, {
+        name,
+        email,
+        consent: true,
+        experienceCategory,
+        status: "pending",
+        source: "early-access-site",
+        userAgent: (navigator.userAgent || "").slice(0, 300),
+        website: "",
+        // serverTimestamp() resolves to the commit time checked by the rules.
+        createdAt: serverTimestamp(),
+      });
+      transaction.set(markerRef, {
+        requestId: requestRef.id,
+        createdAt: serverTimestamp(),
+      });
     });
 
-    await setDoc(doc(db, "requestEmails", emailKey), {
-      requestId: requestRef.id,
-      createdAt: serverTimestamp(),
-    });
-
-    // The request is now durably stored, so the email is a best-effort extra.
-    // This MUST stay after the two writes above: if the Worker were called
-    // first, a Firestore failure would mean emailing an applicant for an
-    // application that does not exist.
+    // The request and marker are durably stored, so email is a best-effort extra.
     //
     // requestRef.id doubles as the Resend idempotency key, so a retry for the
     // same request can never produce a second email.
@@ -223,6 +232,13 @@ form.addEventListener("submit", async (event) => {
     // Hand off to the confirmation page.
     window.location.assign("sent.html");
   } catch (error) {
+    if (error instanceof DuplicateApplicationError) {
+      form.reset();
+      syncSubmitState();
+      showMessage("You have already applied — we have your request on file.");
+      return;
+    }
+
     console.error("CRP signup failed", error);
 
     // `permission-denied` almost always means the rules were not deployed, or

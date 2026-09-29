@@ -31,6 +31,7 @@ import {
 
 import { firebaseConfig } from "./firebase-config.js";
 import { decideViaWorker, postToWorker } from "./worker-client.js";
+import { experienceCategoryDisplay } from "./experience-category.js";
 
 const els = {
   login: document.getElementById("login-view"),
@@ -48,10 +49,14 @@ const els = {
   requestFilter: document.getElementById("request-filter"),
   testerFilter: document.getElementById("tester-filter"),
   toast: document.getElementById("toast"),
+  requestDetails: document.getElementById("request-details"),
+  requestDetailsContent: document.getElementById("request-details-content"),
+  requestDetailsClose: document.getElementById("request-details-close"),
 };
 
 let auth = null;
 let db = null;
+let currentRequests = new Map();
 
 /* ------------------------------------------------------------------ *
  * Helpers
@@ -94,16 +99,19 @@ function setBusy(button, busy) {
 function renderRequests(snapshot) {
   els.requestsBody.innerHTML = "";
   els.requestsCount.textContent = snapshot.size;
+  currentRequests = new Map();
 
   if (snapshot.empty) {
     els.requestsBody.innerHTML =
-      `<tr><td colspan="4" class="empty">No requests in this view.</td></tr>`;
+      `<tr><td colspan="5" class="empty">No requests in this view.</td></tr>`;
     return;
   }
 
   for (const doc of snapshot.docs) {
     const data = doc.data();
+    currentRequests.set(doc.id, data);
     const decided = data.status !== "pending";
+    const category = experienceCategoryDisplay(data.experienceCategory);
     const tr = document.createElement("tr");
 
     tr.innerHTML = `
@@ -111,19 +119,44 @@ function renderRequests(snapshot) {
         <strong>${escapeHtml(data.name)}</strong>
         <div class="muted">${escapeHtml(data.email)}</div>
       </td>
+      <td><span class="experience-badge ${category.className}">${category.label}</span></td>
       <td>${formatDate(data.createdAt)}</td>
       <td><span class="pill pill--${escapeHtml(data.status)}">${escapeHtml(data.status)}</span></td>
       <td class="actions">${
         decided
-          ? `<span class="muted">${
+          ? `<button class="btn" data-request-details="${escapeHtml(doc.id)}">Details</button>
+             <span class="muted">${
               data.reviewedAt ? "reviewed " + formatDate(data.reviewedAt) : "—"
             }</span>`
-          : `<button class="btn btn--approve" data-approve="${doc.id}">Approve</button>
-             <button class="btn btn--reject" data-reject="${doc.id}">Reject</button>`
+          : `<button class="btn" data-request-details="${escapeHtml(doc.id)}">Details</button>
+             <button class="btn btn--approve" data-approve="${escapeHtml(doc.id)}">Approve</button>
+             <button class="btn btn--reject" data-reject="${escapeHtml(doc.id)}">Reject</button>`
       }</td>
     `;
     els.requestsBody.appendChild(tr);
   }
+}
+
+function showRequestDetails(requestId) {
+  const data = currentRequests.get(requestId);
+  if (!data) return;
+  const category = experienceCategoryDisplay(data.experienceCategory);
+
+  els.requestDetailsContent.innerHTML = `
+    <dl class="request-detail-grid">
+      <dt>Applicant</dt><dd>${escapeHtml(data.name || "—")}</dd>
+      <dt>Email</dt><dd>${escapeHtml(data.email || "—")}</dd>
+      <dt>Experience</dt>
+      <dd><span class="experience-badge ${category.className}">${category.label}</span></dd>
+      <dt>Status</dt><dd><span class="pill pill--${escapeHtml(data.status)}">${escapeHtml(data.status)}</span></dd>
+      <dt>Received</dt><dd>${formatDate(data.createdAt)}</dd>
+      <dt>Consent</dt><dd>${data.consent === true ? "Yes" : "No"}</dd>
+      <dt>Review note</dt><dd>${escapeHtml(data.note || "—")}</dd>
+      <dt>Reviewed by</dt><dd>${escapeHtml(data.reviewedBy || "—")}</dd>
+      <dt>Reviewed at</dt><dd>${formatDate(data.reviewedAt)}</dd>
+    </dl>
+  `;
+  els.requestDetails.showModal();
 }
 
 function renderTesters(snapshot) {
@@ -219,6 +252,7 @@ els.testerFilter.addEventListener("change", () => {
   unsubscribeTesters?.();
   unsubscribeTesters = subscribeTesters();
 });
+els.requestDetailsClose.addEventListener("click", () => els.requestDetails.close());
 
 /* ------------------------------------------------------------------ *
  * Actions
@@ -414,9 +448,11 @@ document.addEventListener("click", (event) => {
   const deactivate = el.closest("[data-deactivate]");
   const walletBtn = el.closest("[data-wallet]");
   const removeBtn = el.closest("[data-remove]");
+  const requestDetails = el.closest("[data-request-details]");
 
   if (approve) decideRequest(approve.dataset.approve, "approved", approve);
   else if (reject) decideRequest(reject.dataset.reject, "rejected", reject);
+  else if (requestDetails) showRequestDetails(requestDetails.dataset.requestDetails);
   else if (activate) toggleTester(activate.dataset.activate, true, activate);
   else if (deactivate) toggleTester(deactivate.dataset.deactivate, false, deactivate);
   else if (removeBtn) removeTester(removeBtn.dataset.remove, removeBtn);
@@ -514,5 +550,4 @@ if (!isConfigured()) {
     showApp();
   });
 }
-
 

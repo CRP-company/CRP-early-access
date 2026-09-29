@@ -73,6 +73,7 @@ async function failurePath() {
 
   await page.fill('input[name="name"]', "Alex Morgan");
   await page.fill('input[name="email"]', "alex@example.com");
+  await page.check('input[name="experienceCategory"][value="developer"]');
   await page.check("#consentCheckbox");
   await page.click("#joinButton");
 
@@ -150,6 +151,7 @@ async function happyPath() {
 
   await page.fill('input[name="name"]', "Sam Lee");
   await page.fill('input[name="email"]', "sam@example.com");
+  await page.check('input[name="experienceCategory"][value="everyday_user"]');
   await page.check("#consentCheckbox");
   await page.click("#joinButton");
 

@@ -40,6 +40,20 @@ function memoryStore(seed = {}) {
       docs.set(key, { ...cur, ...data, updateTime: bump() });
       return true;
     },
+    async rejectRequestAndReleaseMarker({ requestId, requestUpdateTime, patch, markerCollection, markerId }) {
+      const requestKey = `requests/${requestId}`;
+      const request = docs.get(requestKey);
+      if (!request || request.updateTime !== requestUpdateTime) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+      const markerKey = `${markerCollection}/${markerId}`;
+      const released = docs.get(markerKey)?.requestId === requestId;
+      docs.set(requestKey, { ...request, ...patch, updateTime: bump() });
+      if (released) docs.delete(markerKey);
+      return { released };
+    },
     async listCollection(c) {
       return [...docs.entries()]
         .filter(([k]) => k.startsWith(`${c}/`))
@@ -249,4 +263,3 @@ describe("setTesterStatus", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 });
-

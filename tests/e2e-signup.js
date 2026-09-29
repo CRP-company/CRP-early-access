@@ -50,6 +50,8 @@ async function clear(db, name) {
   // Mixed case on purpose: the client is expected to normalise before writing.
   await page.fill('input[name="email"]', "Alex.Morgan@Example.com");
   await page.check("#consentCheckbox");
+  const blockedWithoutExperience = await page.isDisabled("#joinButton");
+  await page.check('input[name="experienceCategory"][value="everyday_user"]');
   await page.click("#joinButton");
 
   const landed = await page
@@ -58,6 +60,7 @@ async function clear(db, name) {
     .catch(() => false);
 
   console.log("redirected to sent.html :", landed);
+  console.log("submit blocked without experience:", blockedWithoutExperience);
   console.log("page errors             :", errors.length ? errors.join(" | ") : "none");
 
   if (landed) {
@@ -71,6 +74,7 @@ async function clear(db, name) {
     console.log("  status    :", data.status);
     console.log("  email     :", data.email, data.email === data.email.toLowerCase() ? "(normalised)" : "(NOT normalised)");
     console.log("  consent   :", data.consent);
+    console.log("  experience:", data.experienceCategory);
     console.log("  source    :", data.source);
     console.log("  website   :", JSON.stringify(data.website));
     console.log("  createdAt :", data.createdAt ? "server timestamp set" : "MISSING");
@@ -92,6 +96,7 @@ async function clear(db, name) {
   await page2.goto("http://localhost:8900/index.html?emulator=1", { waitUntil: "networkidle" });
   await page2.fill('input[name="name"]', "Alex Morgan");
   await page2.fill('input[name="email"]', "alex.morgan@example.com");
+  await page2.check('input[name="experienceCategory"][value="everyday_user"]');
   await page2.check("#consentCheckbox");
   await page2.click("#joinButton");
   await page2.waitForTimeout(3000);
@@ -104,7 +109,9 @@ async function clear(db, name) {
 
   const ok =
     landed &&
+    blockedWithoutExperience &&
     stored.size === 1 &&
+    stored.docs[0].data().experienceCategory === "everyday_user" &&
     markers.size === 1 &&
     testers.size === 0 &&
     afterDup.size === 1 &&

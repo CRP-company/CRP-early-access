@@ -156,16 +156,54 @@ export async function decideRequest(store, { requestId, decision, note, actorUid
     at: now,
   };
 
-  // Claim the request atomically before allocating anything.
-  //
-  // The status check above is only a fast path: two approvals that arrive
-  // together both read "pending" and both pass it. Claiming with a versioned
-  // precondition closes that window, so exactly one caller gets here and the
-  // other sees a 409. Without this, the loser of a race would still have burned
-  // a tester number before failing on the tester create.
-  //
-  // This writes the decision first, so a rejected request is never briefly
-  // visible as pending, and the requestEmails marker is untouched either way.
+  if (decision === "rejected") {
+    // The decision and release are atomic. If a newer request owns the email
+    // marker, it remains intact; if the commit is retried, the rejected request
+    // cannot be reverted or have its review fields overwritten.
+    let result = { released: false };
+    try {
+      if (!request.email) {
+        await store.updateDocument(REQUESTS, requestId, common, {
+          updateTime: request.updateTime,
+        });
+      } else {
+        result = await store.rejectRequestAndReleaseMarker({
+          requestId,
+          requestUpdateTime: request.updateTime,
+          patch: common,
+          markerCollection: REQUEST_EMAILS,
+          markerId: await hashEmail(request.email),
+        });
+      }
+    } catch (error) {
+      if (error && (error.status === 409 || error.status === 412)) {
+        const current = await store.getDocument(REQUESTS, requestId);
+        if (current && current.status !== "pending") {
+          throw new AcceptError(409, `This request was already ${current.status}.`);
+        }
+        throw new AcceptError(409, "This request changed while rejecting. Try again.");
+      }
+      throw error;
+    }
+
+    await writeAudit(store, {
+      ...audit,
+      action: "request.rejected",
+      detail: { ...audit.detail, markerReleased: result.released },
+    });
+
+    const emailed = await notifyDecision({
+      env,
+      request,
+      requestId,
+      decision,
+    });
+
+    return { requestId, status: "rejected", emailed, releasedMarker: result.released };
+  }
+
+  // Claim the request atomically before allocating anything. A versioned
+  // precondition ensures concurrent approvals cannot both allocate a number.
   try {
     await store.updateDocument(REQUESTS, requestId, common, {
       updateTime: request.updateTime,
@@ -179,23 +217,6 @@ export async function decideRequest(store, { requestId, decision, note, actorUid
       );
     }
     throw error;
-  }
-
-  if (decision === "rejected") {
-    // A rejected applicant never gets a tester document, so nothing to
-    // promote, no number burned, and no Wallet pass. The requestEmails marker is
-    // deliberately left in place, so a rejected applicant remains a known
-    // applicant and cannot submit again.
-    await writeAudit(store, { ...audit, action: "request.rejected" });
-
-    const emailed = await notifyDecision({
-      env,
-      request,
-      requestId,
-      decision,
-    });
-
-    return { requestId, status: "rejected", emailed };
   }
 
   return acceptApplication(store, {
@@ -577,4 +598,3 @@ export async function setTesterStatus(store, { testerId, status, active, reason,
     testerNumber: patch.testerNumber ?? tester.testerNumber ?? null,
   };
 }
-

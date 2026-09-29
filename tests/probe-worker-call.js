@@ -47,6 +47,7 @@ const PROJECT = process.env.GCLOUD_PROJECT || "crp-cuby-display";
 
   await page.fill('input[name="name"]', "Probe");
   await page.fill('input[name="email"]', "probe@example.com");
+  await page.check('input[name="experienceCategory"][value="developer"]');
   await page.check("#consentCheckbox");
   await page.click("#joinButton");
 

@@ -10,7 +10,7 @@ Two sibling collections, deliberately separate lifecycles:
 
 ```
 requests/{requestId}        public intake, append-only from the visitor's view
-  name, email, consent, source, userAgent
+  name, email, consent, experienceCategory, source, userAgent
   status        pending | approved | rejected
   createdAt, updatedAt, reviewedBy, reviewedAt, note
 
@@ -25,7 +25,7 @@ testers/{testerId}          accepted testers ONLY, staff-managed
   activity       { lastPeriod, comments, reviews }
 
 testers/{testerId}/activity/{YYYY-MM}   immutable per-period counts
-requestEmails/{sha256(email)}           duplicate-lookup marker
+requestEmails/{sha256(email)}           pending/approved/inactive duplicate marker
 meta/testerCounter                      sequential tester-number counter
 audit/{entryId}                         append-only trail of staff actions
 ```
@@ -69,14 +69,14 @@ so an inactive tester receives a `REVOKED` card rather than a live one.
 | Path | Written by | Enforced by |
 |---|---|---|
 | `requests` create | public visitor | `firestore.rules` — exact field allowlist |
-| `requests` decide | `decideRequest` callable | `admin` claim, re-checked in code |
-| `testers` | **Cloud Functions only** | `allow create, update, delete: if false` |
-| `testers.active` | `setTesterActive` callable | `admin` claim + mandatory reason |
-| `audit` | Cloud Functions only | `allow write: if false` |
+| `requests` decide | Cloudflare Worker `/accept` | `admin` claim, re-checked in code |
+| `testers` lifecycle | Cloudflare Worker | `allow create, update, delete: if false` for clients |
+| `testers.active` | Cloudflare Worker `/tester-status` | `admin` claim + mandatory reason |
+| `audit` | Cloudflare Worker admin routes | `allow write: if false` |
 
-Callables run with Admin SDK rights and therefore **bypass** security rules, so
-each one re-checks the `admin` custom claim in code. That is two independent
-checks, not one.
+The Worker uses Firebase service-account access and therefore **bypasses**
+Firestore rules for admin writes. It verifies the caller's Firebase ID token and
+`admin` claim before each admin route.
 
 ## Public form
 
@@ -86,10 +86,18 @@ bundler, no build step, so the site still deploys to GitHub Pages unchanged.
 The rules pin the public write tightly:
 
 - `status` must be exactly `"pending"` — a visitor cannot self-approve
+- `experienceCategory` must be `developer`, `everyday_user`, or `new_to_technology`
 - `createdAt` must equal `request.time` — blocks timestamp spoofing
 - a `website` honeypot must be empty — hidden from humans, filled by bots
 - `hasOnly([...])` — no extra fields can be smuggled in
 - no `list` anywhere — applicant emails are never enumerable
+
+The request and its email marker are created in one Firestore transaction, so
+simultaneous submissions with the same address cannot create duplicate
+requests. Rejection keeps the original request and its review fields, while the
+Worker atomically releases the marker only when it still points to that exact
+request. Pending, approved, and inactive applicants remain blocked; removed
+testers and rejected applicants may apply again.
 
 ## Setup
 
@@ -103,29 +111,32 @@ npm i --prefix functions
 # 2. Paste your web config into js/firebase-config.js and
 #    admin/js/firebase-config.js  (see the .example.js templates)
 
-# 3. Create the Firestore database, Auth provider (Email/Password), then:
+# 3. Create the Firestore database and Auth provider (Email/Password), then:
 npm run deploy:rules
-npm run deploy:functions
 
-# 4. Create a staff user in Firebase console > Authentication, then:
+# 4. Configure the Cloudflare Worker secrets (see crp-tester-email/README.md)
+#    and deploy it:
+npm --prefix crp-tester-email run deploy
+
+# 5. Create a staff user in Firebase console > Authentication, then:
 node scripts/set-admin-claim.js you@crp.com
 ```
 
-Cloud Functions must live in the same region as the Firestore database. This
-project uses `europe-west1` — see `functions/index.js`.
+Publish the updated static site to GitHub Pages as part of the same release as
+the Firestore rules: the rules now require the experience category that the
+updated form submits.
 
 ### Google Wallet credentials
 
-The pass builder reads the service account from the environment, never from a
-file in the repo:
+The Worker pass builder reads the Google Wallet service account from a Worker
+secret, never from a file in the repo:
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS_JSON="$(cat crp-tester-card-*.json)"
-npm run test:wallet
+npx wrangler secret put GOOGLE_WALLET_SERVICE_ACCOUNT_JSON
 ```
 
-For the deployed function, store it in Secret Manager and reference it via
-`defineSecret` rather than an env var.
+The local `test:wallet` script still uses `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+for its separate legacy Functions implementation.
 
 ## Pages
 
@@ -147,10 +158,11 @@ Append `?emulator=1` to `/` to route submissions to the local emulator.
 ## Testing
 
 ```bash
-npm test              # exports + 23 rules tests
-npm run test:rules    # 23 rules tests against the Firestore emulator
+npm test              # exports, email, and 27 rules tests
+npm run test:worker   # Cloudflare Worker suite
+npm run test:rules    # rules tests against the Firestore emulator
 npm run test:wallet   # JWT shape, and pass state follows `active`
-npm run test:e2e      # real form submission -> rules -> sent.html
+npm run test:e2e      # real form submission, category, duplicate gate, sent.html
 npm run emulators     # local Firestore + Auth + Functions
 npm run dev           # static preview on :8900
 ```
@@ -161,17 +173,20 @@ their own record, and the audit trail is unreachable from any client.
 
 `tests/e2e-signup.js` drives a real browser through the form and asserts the
 document that lands in Firestore, that the email is normalised, that a repeat
-submission is refused, and that `testers` stays empty — the separation guarantee
-held end to end.
+submission is refused, the experience category is stored, and `testers` stays
+empty — the separation guarantee held end to end. The rules tests also exercise
+concurrent submissions and reapplication after rejection.
 
 ## Admin dashboard
 
 `/admin` — sign in with an account holding the `admin` claim. Lists the request
-queue and the tester roster side by side, with approve/reject, the active
-toggle, and one-click wallet pass issuance.
+queue and the tester roster side by side, with experience categories in request
+rows and details, approve/reject, the active toggle, and one-click wallet pass
+issuance.
 
-The dashboard never writes to Firestore directly; every mutation is a callable,
-so a tampered client cannot approve a request or flip a status.
+The dashboard never writes to Firestore directly; every mutation goes through
+the authenticated Cloudflare Worker, so a tampered client cannot approve a
+request or flip a status.
 
 ## Transactional email (Resend)
 
@@ -187,7 +202,7 @@ browser  -> Worker /send    -> Resend  (best-effort acknowledgement)
 | Path | Role |
 |---|---|
 | `crp-tester-email/` | The Worker. See its own README for detail. |
-| `js/signup.js` | Calls the Worker after `addDoc()` succeeds |
+| `js/signup.js` | Calls the Worker after the request transaction succeeds |
 | `js/worker-config.js` | The Worker URL (public, safe to commit) |
 | `functions/src/email*.js` | The earlier Firestore-trigger path, superseded |
 

@@ -21,6 +21,7 @@ const {
   getDoc,
   getDocs,
   setDoc,
+  runTransaction,
   updateDoc,
   deleteDoc,
   serverTimestamp,
@@ -30,6 +31,7 @@ const PROJECT = process.env.GCLOUD_PROJECT || "crp-cuby-display";
 const RULES = fs.readFileSync("firestore.rules", "utf8");
 
 let testEnv;
+let adminDb;
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
@@ -39,6 +41,7 @@ function validRequest(overrides = {}) {
     name: "Alex Morgan",
     email: "alex@example.com",
     consent: true,
+    experienceCategory: "developer",
     status: "pending",
     source: "early-access-site",
     userAgent: "test-agent",
@@ -66,6 +69,22 @@ test("anonymous visitor CANNOT forge consent", async () => {
   await assertFails(addDoc(collection(anon(), "requests"), validRequest({ consent: false })));
 });
 
+test("anonymous visitor CANNOT omit or forge the experience category", async () => {
+  const { experienceCategory: _category, ...withoutCategory } = validRequest();
+  await assertFails(addDoc(collection(anon(), "requests"), withoutCategory));
+  await assertFails(
+    addDoc(collection(anon(), "requests"), validRequest({ experienceCategory: "expert" })),
+  );
+});
+
+test("all supported experience categories are accepted", async () => {
+  for (const experienceCategory of ["developer", "everyday_user", "new_to_technology"]) {
+    await assertSucceeds(
+      addDoc(collection(anon(), "requests"), validRequest({ experienceCategory })),
+    );
+  }
+});
+
 test("anonymous visitor CANNOT fill the honeypot", async () => {
   await assertFails(
     addDoc(collection(anon(), "requests"), validRequest({ website: "http://spam.example" })),
@@ -86,6 +105,75 @@ test("anonymous visitor CANNOT spoof the timestamp", async () => {
 
 test("anonymous visitor CANNOT submit a malformed email", async () => {
   await assertFails(addDoc(collection(anon(), "requests"), validRequest({ email: "not-an-email" })));
+});
+
+test("concurrent submissions atomically keep one request and its marker", async () => {
+  const db = anon();
+  const markerRef = doc(db, "requestEmails", `race-${Date.now()}`);
+  const submit = () => runTransaction(db, async (transaction) => {
+    const marker = await transaction.get(markerRef);
+    if (marker.exists()) throw new Error("duplicate application");
+
+    const requestRef = doc(collection(db, "requests"));
+    transaction.set(requestRef, validRequest());
+    transaction.set(markerRef, {
+      requestId: requestRef.id,
+      createdAt: serverTimestamp(),
+    });
+    return requestRef.id;
+  });
+
+  const results = await Promise.allSettled([submit(), submit()]);
+  const accepted = results.filter((result) => result.status === "fulfilled");
+  if (accepted.length !== 1) {
+    throw new Error(`Expected one concurrent submission, received ${accepted.length}.`);
+  }
+
+  const marker = await getDoc(markerRef);
+  if (!marker.exists() || marker.data().requestId !== accepted[0].value) {
+    throw new Error("The email marker does not point to the accepted request.");
+  }
+  const request = await adminDb.doc(`requests/${accepted[0].value}`).get();
+  if (!request.exists || request.data().status !== "pending") {
+    throw new Error("The accepted request was not stored as pending.");
+  }
+});
+
+test("a rejected applicant can submit a new request without changing the old one", async () => {
+  const db = anon();
+  const email = `reapply-${Date.now()}@example.com`;
+  const emailKey = require("node:crypto").createHash("sha256").update(email).digest("hex");
+  const markerRef = doc(db, "requestEmails", emailKey);
+  const submit = () => runTransaction(db, async (transaction) => {
+    const marker = await transaction.get(markerRef);
+    if (marker.exists()) throw new Error("duplicate application");
+    const requestRef = doc(collection(db, "requests"));
+    transaction.set(requestRef, validRequest({ email }));
+    transaction.set(markerRef, { requestId: requestRef.id, createdAt: serverTimestamp() });
+    return requestRef.id;
+  });
+
+  const rejectedRequestId = await submit();
+  await adminDb.doc(`requests/${rejectedRequestId}`).update({
+    status: "rejected",
+    note: "Try again later",
+  });
+  await adminDb.doc(`requestEmails/${emailKey}`).delete();
+
+  const newRequestId = await submit();
+  const oldRequest = await adminDb.doc(`requests/${rejectedRequestId}`).get();
+  const newRequest = await adminDb.doc(`requests/${newRequestId}`).get();
+  const marker = await adminDb.doc(`requestEmails/${emailKey}`).get();
+
+  if (newRequestId === rejectedRequestId || oldRequest.data().status !== "rejected") {
+    throw new Error("The reapplication replaced or changed the rejected request.");
+  }
+  if (oldRequest.data().note !== "Try again later" || newRequest.data().status !== "pending") {
+    throw new Error("The request history or new request status was not preserved.");
+  }
+  if (marker.data().requestId !== newRequestId) {
+    throw new Error("The marker does not point to the new application.");
+  }
 });
 
 /* ------------------------------------------ requests: everything else denied */
@@ -202,7 +290,7 @@ test("unknown collections are denied by default", async () => {
   const { getFirestore } = require("firebase-admin/firestore");
 
   const adminApp = initializeApp({ projectId: PROJECT });
-  const adminDb = getFirestore(adminApp);
+  adminDb = getFirestore(adminApp);
 
   await adminDb.doc("testers/t_seed").set({
     email: "tester@example.com",
@@ -234,4 +322,3 @@ test("unknown collections are denied by default", async () => {
   console.error("Test harness failed:", error);
   process.exit(1);
 });
-

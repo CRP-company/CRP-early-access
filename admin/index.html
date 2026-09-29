@@ -58,7 +58,7 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Applicant</th><th>Received</th><th>Status</th><th>Actions</th></tr>
+            <tr><th>Applicant</th><th>Experience</th><th>Received</th><th>Status</th><th>Actions</th></tr>
           </thead>
           <tbody id="requests-body"></tbody>
         </table>
@@ -94,6 +94,14 @@
       </div>
     </section>
   </main>
+
+  <dialog id="request-details" class="request-details" aria-labelledby="request-details-title">
+    <div class="request-details__head">
+      <h2 id="request-details-title">Request details</h2>
+      <button id="request-details-close" class="btn" type="button">Close</button>
+    </div>
+    <div id="request-details-content"></div>
+  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

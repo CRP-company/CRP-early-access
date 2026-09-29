@@ -112,7 +112,7 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
           <tr>
             <td align="center" style="padding-bottom:8px;">
               <h1 style="margin:0; font-size:34px; line-height:1.15; font-weight:600; letter-spacing:-0.5px; color:#000000;">
-                You're in. <span style="color:#22a447; font-size:30px; vertical-align:2px;">✓</span>
+                You're in.
               </h1>
             </td>
           </tr>

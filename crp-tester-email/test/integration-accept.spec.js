@@ -148,10 +148,46 @@ function installFirestore() {
     }
     if (url.startsWith(BASE)) {
       const parsed = new URL(url);
+      const body = init.body ? JSON.parse(init.body) : {};
+      if (parsed.pathname.endsWith("/documents:beginTransaction")) {
+        return json({ transaction: "integration-transaction" });
+      }
+      if (parsed.pathname.endsWith("/documents:rollback")) return json({});
+      if (parsed.pathname.endsWith("/documents:commit")) {
+        const writes = body.writes || [];
+        const staged = [];
+        for (const write of writes) {
+          if (write.update) {
+            const key = write.update.name.slice(write.update.name.indexOf("/documents/") + 11);
+            const current = store.docs.get(key);
+            const expected = write.currentDocument?.updateTime;
+            if (!current || (expected && current.updateTime !== expected)) {
+              return json({ error: { code: 409 } }, 409);
+            }
+            staged.push([
+              key,
+              { ...current, ...decodeFields(write.update.fields), updateTime: bump() },
+            ]);
+          } else if (write.delete) {
+            const key = write.delete.slice(write.delete.indexOf("/documents/") + 11);
+            const current = store.docs.get(key);
+            const expected = write.currentDocument?.updateTime;
+            if (expected && (!current || current.updateTime !== expected)) {
+              return json({ error: { code: 409 } }, 409);
+            }
+            staged.push([key, null]);
+          }
+        }
+        for (const [key, value] of staged) {
+          if (value === null) store.docs.delete(key);
+          else store.docs.set(key, value);
+        }
+        return json({});
+      }
       // Split on the LAST "/documents/" — the database id is "(default)",
       // which itself contains a slash and would defeat a naive split.
       const path = parsed.pathname.slice(parsed.pathname.lastIndexOf("/documents/") + 11);
-      if (path.includes(":")) return json({}); // transaction verbs, unused here
+      if (path.includes(":")) return json({});
 
       const method = init.method || "GET";
       const [c, ...rest] = path.split("/");
@@ -272,7 +308,9 @@ const seedRequest = (over = {}) => {
     source: "early-access-site",
     userAgent: "test-agent",
     website: "",
+    experienceCategory: "developer",
     createdAt: "2026-09-01T00:00:00.000Z",
+    updateTime: "seed-version",
     ...over,
   });
 };
@@ -836,7 +874,6 @@ describe("Admin Dashboard -> Worker /tester-wallet", () => {
     expect(resendCalls).toHaveLength(0);
   });
 });
-
 
 
 

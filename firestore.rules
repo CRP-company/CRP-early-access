@@ -41,6 +41,7 @@ service cloud.firestore {
           'name',
           'email',
           'consent',
+          'experienceCategory',
           'status',
           'source',
           'createdAt',
@@ -53,6 +54,7 @@ service cloud.firestore {
         && data.email is string
         && data.email.size() <= 254
         && data.email.matches('^[^@]+@[^@]+\\.[^@\\.]+$')
+        && data.experienceCategory in ['developer', 'everyday_user', 'new_to_technology']
         // consent is required by the form's checkbox; store it as proof.
         && data.consent == true
         // A visitor may never create a pre-approved request.

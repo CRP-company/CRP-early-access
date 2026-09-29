@@ -62,6 +62,7 @@ const { chromium } = require("playwright");
   await bpage.goto("http://localhost:8900/index.html");
   await bpage.fill('input[name="name"]', "Bot");
   await bpage.fill('input[name="email"]', "bot@spam.example");
+  await bpage.check('input[name="experienceCategory"][value="new_to_technology"]');
   await bpage.check("#consentCheckbox");
   await bpage.evaluate(() => {
     document.querySelector('input[name="website"]').value = "http://spam.example";

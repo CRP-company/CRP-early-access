@@ -226,6 +226,56 @@ td.actions .btn { margin-left: 0.35rem; }
 .pill--approved, .pill--active { background: var(--ok-bg); color: var(--ok-fg); }
 .pill--rejected, .pill--inactive { background: var(--danger-bg); color: var(--danger-fg); }
 
+.experience-badge {
+  display: inline-block;
+  max-width: 15rem;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 40px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.experience-badge--developer { background: #efefed; color: #333; }
+.experience-badge--everyday { background: #f2f0eb; color: #514b40; }
+.experience-badge--new { background: #eaf0ed; color: #365045; }
+.experience-badge--unspecified { background: #fff; border-color: var(--border); color: var(--muted); }
+
+/* ------------------------------------------------------------ request details */
+
+.request-details {
+  width: min(36rem, calc(100vw - 2rem));
+  max-width: none;
+  max-height: min(80vh, 42rem);
+  margin: auto;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.2);
+}
+
+.request-details::backdrop { background: rgba(15, 15, 15, 0.38); }
+
+.request-details__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.request-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(6rem, 0.35fr) minmax(0, 1fr);
+  gap: 0.75rem 1rem;
+}
+
+.request-detail-grid dt { color: var(--muted); font-size: 0.84rem; }
+.request-detail-grid dd { min-width: 0; overflow-wrap: anywhere; font-size: 0.9rem; }
+
 /* ---------------------------------------------------------------- toast */
 
 .toast {
@@ -252,4 +302,10 @@ td.actions .btn { margin-left: 0.35rem; }
 
 @media (prefers-reduced-motion: reduce) {
   .toast { transition: none; }
+}
+
+@media (max-width: 540px) {
+  .request-details { padding: 1rem; }
+  .request-detail-grid { grid-template-columns: 1fr; gap: 0.25rem; }
+  .request-detail-grid dd { margin-bottom: 0.55rem; }
 }

@@ -118,8 +118,12 @@ export function createFirestore(secretJson, projectId) {
   }
 
   /** Fetch a document. Returns null when it does not exist. */
-  async function getDocument(collection, id) {
-    const res = await fetch(docName(collection, id), { headers: await authHeaders() });
+  async function getDocument(collection, id, options = {}) {
+    const url = new URL(docName(collection, id));
+    if (options.transaction) {
+      url.searchParams.set("transaction", options.transaction);
+    }
+    const res = await fetch(url, { headers: await authHeaders() });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Firestore GET failed (${res.status}): ${await res.text()}`);
     const doc = await res.json();
@@ -351,6 +355,47 @@ export function createFirestore(secretJson, projectId) {
     return { removed: true };
   }
 
+  /**
+   * Reject a request and release its email marker as one atomic decision.
+   * The marker is deleted only if it still points to this request.
+   */
+  async function rejectRequestAndReleaseMarker({
+    requestId,
+    requestUpdateTime,
+    patch,
+    markerCollection,
+    markerId,
+  }) {
+    const transaction = await beginTransaction();
+    try {
+      const marker = await getDocument(markerCollection, markerId, { transaction });
+      const ownsMarker = marker?.requestId === requestId;
+      const writes = [
+        {
+          update: {
+            name: docPath("requests", requestId),
+            fields: encodeFields(patch),
+          },
+          updateMask: { fieldPaths: Object.keys(patch) },
+          currentDocument: { updateTime: requestUpdateTime },
+        },
+      ];
+
+      if (ownsMarker) {
+        writes.push({
+          delete: docPath(markerCollection, markerId),
+          currentDocument: { updateTime: marker.updateTime },
+        });
+      }
+
+      await commit(transaction, writes);
+      return { released: ownsMarker };
+    } catch (error) {
+      await rollback(transaction);
+      throw error;
+    }
+  }
+
   return {
     getDocument,
     createDocument,
@@ -360,7 +405,7 @@ export function createFirestore(secretJson, projectId) {
     commit,
     rollback,
     removeTester,
+    rejectRequestAndReleaseMarker,
     docName,
   };
 }
-

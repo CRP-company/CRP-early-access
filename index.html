@@ -161,6 +161,69 @@
       border-color: #a0a0a0;
       box-shadow: 0 0 0 2px rgba(0,0,0,0.02);
     }
+    .experience-fieldset {
+      border: 0;
+      margin: 1.25rem 0 0;
+      padding: 0;
+    }
+    .experience-fieldset legend {
+      margin-bottom: 0.65rem;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: #3d3d3d;
+    }
+    .experience-options {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.65rem;
+    }
+    .experience-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6rem;
+      min-width: 0;
+      min-height: 4.5rem;
+      padding: 0.85rem 0.8rem;
+      border: 1px solid #e2e2e2;
+      border-radius: 18px;
+      background: #fff;
+      cursor: pointer;
+      transition: background 0.16s ease, border-color 0.16s ease;
+    }
+    .experience-option:hover {
+      border-color: #bdbdbd;
+    }
+    .experience-option:has(input:checked) {
+      border-color: #555;
+      background: #f6f6f4;
+    }
+    .experience-option input {
+      flex: 0 0 auto;
+      width: 18px;
+      height: 18px;
+      margin: 0.1rem 0 0;
+      accent-color: #171717;
+    }
+    .experience-option input:focus-visible {
+      outline: 2px solid #171717;
+      outline-offset: 3px;
+    }
+    .experience-option__copy {
+      display: grid;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+    .experience-option__title {
+      font-size: 0.82rem;
+      line-height: 1.3;
+      font-weight: 500;
+      color: #222;
+    }
+    .experience-option__description {
+      font-size: 0.76rem;
+      line-height: 1.4;
+      color: #5c5c5c;
+    }
     .btn-primary {
       background: #000000;
       border: none;
@@ -174,6 +237,7 @@
       transition: background 0.2s, transform 0.1s;
       letter-spacing: -0.2px;
       white-space: nowrap;
+      margin-top: 1.25rem;
     }
     .btn-primary:hover:not(:disabled) {
       background: #2b2b2b;
@@ -557,6 +621,9 @@
     .perk:nth-of-type(4) { transition-delay: 240ms; }
 
     @media (prefers-reduced-motion: reduce) {
+      .experience-option {
+        transition: none;
+      }
       .perk {
         transition: none;
       }
@@ -579,6 +646,9 @@
       .form-row {
         flex-direction: column;
         align-items: stretch;
+      }
+      .experience-options {
+        grid-template-columns: 1fr;
       }
       .btn-primary {
         white-space: normal;
@@ -652,15 +722,41 @@
     <form action="" method="POST" class="signup-form" id="signupForm" novalidate>
       <div class="form-row">
         <div class="input-group">
-          <label>Full name</label>
-          <input type="text" name="name" required placeholder="Alex Morgan" autocomplete="name">
+          <label for="applicantName">Full name</label>
+          <input id="applicantName" type="text" name="name" required placeholder="Alex Morgan" autocomplete="name">
         </div>
         <div class="input-group">
-          <label>Email address</label>
-          <input type="email" name="email" required placeholder="test@gmail.com" autocomplete="email">
+          <label for="applicantEmail">Email address</label>
+          <input id="applicantEmail" type="email" name="email" required placeholder="test@gmail.com" autocomplete="email">
         </div>
-        <button type="submit" class="btn-primary" id="joinButton" disabled>Send request</button>
       </div>
+
+      <fieldset class="experience-fieldset">
+        <legend>Which best describes you? (required)</legend>
+        <div class="experience-options">
+          <label class="experience-option">
+            <input type="radio" name="experienceCategory" value="developer" required>
+            <span class="experience-option__copy">
+              <span class="experience-option__title">Developer / Tech enthusiast</span>
+              <span class="experience-option__description">I have experience with software, hardware or technology.</span>
+            </span>
+          </label>
+          <label class="experience-option">
+            <input type="radio" name="experienceCategory" value="everyday_user" required>
+            <span class="experience-option__copy">
+              <span class="experience-option__title">Everyday user</span>
+              <span class="experience-option__description">I use technology regularly but don't work with it professionally.</span>
+            </span>
+          </label>
+          <label class="experience-option">
+            <input type="radio" name="experienceCategory" value="new_to_technology" required>
+            <span class="experience-option__copy">
+              <span class="experience-option__title">New to technology</span>
+              <span class="experience-option__description">I prefer simple technology and don't have much technical experience.</span>
+            </span>
+          </label>
+        </div>
+      </fieldset>
 
       <!-- Honeypot. Hidden from humans, so a real submission always leaves it
            empty; a filled value identifies a bot. Kept out of the tab order and
@@ -678,6 +774,7 @@
           <a href="https://crp-company.github.io/CRP-Privacy-policy/" target="_blank">Privacy policy</a>.
         </label>
       </div>
+      <button type="submit" class="btn-primary" id="joinButton" disabled>Send request</button>
       <div id="formMessage" class="form-message"></div>
     </form>
   </div>

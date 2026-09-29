@@ -8,7 +8,8 @@
  *   - a duplicate approval is refused before allocating anything
  *   - rejection never touches Wallet
  *   - the request document keeps every field it had before the decision
- *   - duplicate protection is unaffected: the requestEmails marker is untouched
+ *   - rejection releases only its own email marker; approved/inactive markers
+ *     remain so duplicate applications stay blocked
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { decideRequest, setTesterStatus, removeTester } from "../src/accept.js";
@@ -57,6 +58,22 @@ function memoryStore(seed = {}) {
       // Merge, mirroring the updateMask behaviour of the REST client.
       docs.set(key, { ...cur, ...data, updateTime: bump() });
       return true;
+    },
+    async rejectRequestAndReleaseMarker({ requestId, requestUpdateTime, patch, markerCollection, markerId }) {
+      const requestKey = `requests/${requestId}`;
+      const request = docs.get(requestKey);
+      if (!request || request.updateTime !== requestUpdateTime) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+
+      const markerKey = `${markerCollection}/${markerId}`;
+      const marker = docs.get(markerKey);
+      const released = marker?.requestId === requestId;
+      docs.set(requestKey, { ...request, ...patch, updateTime: bump() });
+      if (released) docs.delete(markerKey);
+      return { released };
     },
     async listCollection(c) {
       return [...docs.entries()]
@@ -125,11 +142,17 @@ const REQ = (over = {}) => ({
   source: "early-access-site",
   userAgent: "test-agent",
   website: "",
+  experienceCategory: "developer",
   createdAt: "2026-09-01T00:00:00.000Z",
   ...over,
 });
 
 const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
+
+async function markerKey(email) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 /** A throwaway RSA key so Wallet signing is genuine, not stubbed. */
 let keyPair;
@@ -268,6 +291,7 @@ describe("REJECTION", () => {
       "source",
       "userAgent",
       "website",
+      "experienceCategory",
       "createdAt",
     ]) {
       expect(doc[field], field).toBe(REQ()[field]);
@@ -277,19 +301,75 @@ describe("REJECTION", () => {
     expect(doc.reviewedAt).toBeInstanceOf(Date);
   });
 
-  it("leaves the requestEmails marker in place (duplicate protection intact)", async () => {
+  it("releases only its own marker and permits a fresh request with the same email", async () => {
+    const markerId = await markerKey("alex@example.com");
     const store = memoryStore({
       "requests/r1": REQ(),
-      "requestEmails/abc123": { requestId: "r1", createdAt: "2026-09-01T00:00:00.000Z" },
+      [`requestEmails/${markerId}`]: { requestId: "r1", createdAt: "2026-09-01T00:00:00.000Z" },
     });
     stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() });
+    const result = await decideRequest(store, {
+      requestId: "r1",
+      decision: "rejected",
+      note: "Try again later",
+      ...actor,
+      env: env(),
+    });
 
-    // Untouched: a rejected applicant remains a known applicant.
-    const marker = store.docs.get("requestEmails/abc123");
-    expect(marker).toBeDefined();
-    expect(marker.requestId).toBe("r1");
+    expect(result.releasedMarker).toBe(true);
+    expect(store.docs.has(`requestEmails/${markerId}`)).toBe(false);
+    expect(store.docs.get("requests/r1")).toMatchObject({
+      status: "rejected",
+      note: "Try again later",
+      name: "Alex Morgan",
+      email: "alex@example.com",
+      experienceCategory: "developer",
+    });
+
+    store.docs.set("requests/r2", REQ({ createdAt: new Date(), status: "pending" }));
+    store.docs.set(`requestEmails/${markerId}`, {
+      requestId: "r2",
+      createdAt: "2026-09-29T00:00:00.000Z",
+    });
+    await expect(
+      decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(store.docs.get("requests/r1").status).toBe("rejected");
+    expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r2");
+  });
+
+  it("does not release a marker now owned by a newer request", async () => {
+    const markerId = await markerKey("alex@example.com");
+    const store = memoryStore({
+      "requests/r1": REQ(),
+      [`requestEmails/${markerId}`]: { requestId: "r2", createdAt: "2026-09-29T00:00:00.000Z" },
+    });
+    stubResend();
+
+    const result = await decideRequest(store, {
+      requestId: "r1",
+      decision: "rejected",
+      ...actor,
+      env: env(),
+    });
+
+    expect(result.releasedMarker).toBe(false);
+    expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r2");
+    expect(store.docs.get("requests/r1").status).toBe("rejected");
+  });
+
+  it("allows only one of two concurrent rejection attempts to complete", async () => {
+    const store = memoryStore({ "requests/r1": REQ() });
+    stubResend();
+
+    const results = await Promise.allSettled([
+      decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() }),
+      decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(store.docs.get("requests/r1").status).toBe("rejected");
   });
 
   it("records the rejection in the audit trail", async () => {
@@ -341,6 +421,19 @@ describe("APPROVAL", () => {
     expect(tester.email).toBe("alex@example.com");
     expect(tester.active).toBe(true);
     expect(store.docs.get("requests/r1").status).toBe("approved");
+  });
+
+  it("keeps the email marker for approved applicants", async () => {
+    const markerId = await markerKey("alex@example.com");
+    const store = memoryStore({
+      "requests/r1": REQ(),
+      [`requestEmails/${markerId}`]: { requestId: "r1", createdAt: "2026-09-01T00:00:00.000Z" },
+    });
+    stubResend();
+
+    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+
+    expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r1");
   });
 
   it("generates a Google Wallet save URL for the accepted tester", async () => {
@@ -414,7 +507,15 @@ describe("APPROVAL", () => {
     await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
 
     const doc = store.docs.get("requests/r1");
-    for (const field of ["name", "email", "consent", "source", "userAgent", "createdAt"]) {
+    for (const field of [
+      "name",
+      "email",
+      "consent",
+      "experienceCategory",
+      "source",
+      "userAgent",
+      "createdAt",
+    ]) {
       expect(doc[field], field).toBe(REQ()[field]);
     }
     expect(doc.status).toBe("approved");
@@ -577,6 +678,25 @@ describe("deactivation requires a reason (setTesterActive parity)", () => {
     expect(doc.deactivatedBy).toBe("admin-1");
     // The tester number must survive a revoke.
     expect(doc.testerNumber).toBe(1);
+  });
+
+  it("keeps an inactive tester's email marker so they cannot reapply", async () => {
+    const email = "a@b.com";
+    const markerId = await markerKey(email);
+    const store = memoryStore({
+      "testers/t1": { email, status: "accepted", active: true, testerNumber: 1 },
+      [`requestEmails/${markerId}`]: { requestId: "r1" },
+    });
+
+    await setTesterStatus(store, {
+      testerId: "t1",
+      active: false,
+      reason: "inactive",
+      ...actor,
+    });
+
+    expect(store.docs.get("testers/t1").active).toBe(false);
+    expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r1");
   });
 
   it("reactivates without needing a reason and burns no number", async () => {
@@ -774,6 +894,12 @@ describe("admin dashboard source no longer calls the removed Cloud Function", ()
 
   it("still uses the Worker for approve/reject", () => {
     expect(adminSource).toContain("/accept");
+  });
+
+  it("shows experience categories in the request list and details", () => {
+    expect(adminSource).toContain("experienceCategoryDisplay(data.experienceCategory)");
+    expect(adminSource).toContain('data-request-details="${escapeHtml(doc.id)}"');
+    expect(adminSource).toContain("<dt>Experience</dt>");
   });
 
   it("keeps the admin claim enforcement in the Worker", () => {
