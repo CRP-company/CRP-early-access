@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>CRP · Request received</title>
+  <meta name="description" content="We have your CRP early access request and will be in touch.">
+  <meta name="robots" content="noindex">
+  <!-- Google Fonts: Inter & Space Grotesk -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bitcount+Single:wght@100..900&family=Doto:wght@400..900&family=Space+Grotesk:wght@300;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background-color: #ffffff;
+      font-family: 'Inter', sans-serif;
+      color: #1a1a1a;
+      line-height: 1.4;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* subtle grid overlay — same as the landing page */
+    .grid-bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        linear-gradient(to right, rgba(0,0,0,0.02) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0,0,0,0.02) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    .container {
+      max-width: 1280px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 2.5rem 2rem 3rem;
+      position: relative;
+      z-index: 2;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+
+    /* Logo, centred above the heading.
+       The source image is a 500x500 square with a large transparent/white
+       margin around the mark, so at a plain 88px the artwork renders tiny.
+       Scaling up and pulling it back with negative insets crops to the mark
+       without editing the asset — swap in a tighter logo and this still works,
+       since object-fit:contain keeps it centred. */
+    .logo-wrap {
+      width: 96px;
+      height: 96px;
+      margin-bottom: 2.5rem;
+      overflow: hidden;
+    }
+
+    .logo-wrap img {
+      width: 190px;
+      height: 190px;
+      max-width: none;
+      /* Centre the artwork inside the 96px window. */
+      margin: -47px 0 0 -47px;
+      object-fit: contain;
+      display: block;
+    }
+
+    h1 {
+      font-family: "Bitcount Single", system-ui;
+      font-weight: 400;
+      font-size: 3.6rem;
+      letter-spacing: -0.02em;
+      color: #000000;
+      margin-bottom: 1.25rem;
+      line-height: 1.1;
+      text-transform: lowercase;
+    }
+
+    .lede {
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: #4a4a4a;
+      max-width: 480px;
+      margin-bottom: 2.25rem;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: center;
+    }
+
+    /* Buttons reuse the landing page's pill language */
+    .btn-back {
+      display: inline-block;
+      background: #000000;
+      border: none;
+      padding: 0.9rem 2rem;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      font-size: 0.95rem;
+      border-radius: 40px;
+      color: white;
+      cursor: pointer;
+      text-decoration: none;
+      letter-spacing: -0.2px;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn-back:hover { background: #2b2b2b; }
+    .btn-back:active { transform: scale(0.98); }
+    .btn-back:focus-visible { outline: 2px solid #000; outline-offset: 3px; }
+
+    .btn-ghost {
+      display: inline-block;
+      padding: 0.9rem 1.75rem;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      font-size: 0.95rem;
+      border-radius: 40px;
+      color: #2c2c2c;
+      background: #ffffff;
+      border: 1px solid #e2e2e2;
+      text-decoration: none;
+      letter-spacing: -0.2px;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn-ghost:hover { background: #f6f6f6; }
+    .btn-ghost:active { transform: scale(0.98); }
+    .btn-ghost:focus-visible { outline: 2px solid #000; outline-offset: 3px; }
+
+    .footer {
+      position: relative;
+      z-index: 2;
+      text-align: center;
+      padding: 0 2rem 2.5rem;
+      font-size: 0.8rem;
+      color: #8a8a8a;
+    }
+
+    @media (max-width: 540px) {
+      h1 { font-size: 2.4rem; }
+      .logo-wrap { width: 76px; height: 76px; }
+      .logo-wrap img { width: 150px; height: 150px; margin: -37px 0 0 -37px; }
+      .container { padding: 2rem 1.5rem 2.5rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .btn-back, .btn-ghost { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+
+  <main class="container">
+    <!-- Logo, top centre -->
+    <div class="logo-wrap">
+      <img src="https://i.postimg.cc/K8zf4q4q/CRPlogo.png" alt="CRP" width="88" height="88">
+    </div>
+
+    <h1>we got your request</h1>
+
+    <p class="lede" id="lede">
+      We will send you an email as soon as a reply arrives. You will usually
+      hear from us within seven working days.
+    </p>
+
+    <div class="actions">
+      <a class="btn-back" href="index.html">Back to main page</a>
+      <a class="btn-ghost" href="https://crp-company.github.io/CRP-Privacy-policy/" target="_blank" rel="noopener">Privacy policy</a>
+    </div>
+  </main>
+
+  <footer class="footer">©2026 CRP. All rights reserved.</footer>
+
+  <script>
+    // Personalise the confirmation with the email that was just submitted, so
+    // the page is unambiguous on a shared screen. Falls back silently when
+    // storage is unavailable (private browsing) or the page is opened directly.
+    (function () {
+      var lede = document.getElementById('lede');
+      var email;
+
+      try {
+        email = sessionStorage.getItem('crp:lastRequestEmail');
+      } catch (e) {
+        return; // storage blocked — the generic copy above is already correct
+      }
+
+      if (!email) return;
+
+      // The value is written by our own form, but strip angle brackets anyway
+      // so it can never be interpreted as markup if it is ever tampered with.
+      lede.innerHTML =
+        'We will send a reply to <strong>' +
+        email.replace(/[<>]/g, '') +
+        '</strong> as soon as one arrives. You will usually hear from us ' +
+        'within seven working days.';
+
+      // One-time use: a later visit should not name a stale address.
+      try {
+        sessionStorage.removeItem('crp:lastRequestEmail');
+      } catch (e) { /* ignore */ }
+    })();
+  </script>
+</body>
+</html>

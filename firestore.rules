@@ -1,0 +1,137 @@
+rules_version = '2';
+
+// CRP early-access — Firestore security rules.
+//
+// Design goals
+//  1. `requests` and `testers` are separate collections with separate lifecycles.
+//  2. Anyone may CREATE a request, but nobody but an admin may read, edit or
+//     delete one. Requests are append-only from the public's point of view.
+//  3. `testers` is written ONLY by Cloud Functions via the Admin SDK, which
+//     bypasses these rules. There is deliberately no client-side create/update
+//     path, so a tester record can never be forged or flipped `active` by a
+//     visitor. `allow write: if false;` is the enforcement point.
+//
+// Deploy with: firebase deploy --only firestore:rules
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------- helpers
+
+    // Staff identity comes from a custom claim on the Firebase Auth token,
+    // not from a field in Firestore (which any client could self-write).
+    // Set it with: node scripts/set-admin-claim.js <uid|email>
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.admin == true;
+    }
+
+    // A signed-in tester may read exactly their own record. Matching on the
+    // verified token email means they cannot widen this to other testers.
+    function isSelf(email) {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email == email;
+    }
+
+    // Every field the public form is allowed to submit. Anything else in the
+    // document fails hasOnly() and the write is rejected outright.
+    function validNewRequest(data) {
+      return data.keys().hasOnly([
+          'name',
+          'email',
+          'consent',
+          'status',
+          'source',
+          'createdAt',
+          'userAgent',
+          'website'
+        ])
+        && data.name is string
+        && data.name.size() >= 2
+        && data.name.size() <= 80
+        && data.email is string
+        && data.email.size() <= 254
+        && data.email.matches('^[^@]+@[^@]+\\.[^@\\.]+$')
+        // consent is required by the form's checkbox; store it as proof.
+        && data.consent == true
+        // A visitor may never create a pre-approved request.
+        && data.status == 'pending'
+        && data.source == 'early-access-site'
+        // Honeypot: the field is hidden from humans, so a real submission
+        // always leaves it empty. A filled value means a bot.
+        && data.website == ''
+        // serverTimestamp() resolves to the commit time, so this both blocks
+        // spoofed dates and pins ordering to the server clock.
+        && data.createdAt == request.time
+        && data.userAgent is string
+        && data.userAgent.size() <= 300;
+    }
+
+    // -------------------------------------------------------------- requests
+    // Public intake queue. Anonymous reads are blocked: the collection holds
+    // other people's email addresses.
+    match /requests/{requestId} {
+      allow create: if validNewRequest(request.resource.data);
+      allow read, list: if isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    // A public "did I already apply" marker, so a repeat visitor is told they
+    // are already queued instead of silently creating a second row.
+    //
+    // The document id is a SHA-256 hash of the lowercased email, and the body
+    // holds only a request id and a timestamp — no name, no email address. So
+    // `get` here leaks no personal data; `list` stays denied so the collection
+    // cannot be enumerated.
+    match /requestEmails/{emailKey} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create: if request.resource.data.keys().hasOnly(['requestId', 'createdAt'])
+        && request.resource.data.requestId is string
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // --------------------------------------------------------------- testers
+    // Accepted testers only. Created and mutated exclusively by Cloud
+    // Functions (Admin SDK bypasses these rules).
+    match /testers/{testerId} {
+      allow get: if isAdmin() || (resource.data.email is string && isSelf(resource.data.email));
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // Monthly activity log (comments / reviews per month), used to decide
+    // who stays active. Written by Cloud Functions from the review pipeline.
+    match /testers/{testerId}/activity/{period} {
+      allow read: if isAdmin()
+        || (get(/databases/$(database)/documents/testers/$(testerId)).data.email is string
+            && isSelf(get(/databases/$(database)/documents/testers/$(testerId)).data.email));
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------- meta
+    // Internal counters, e.g. meta/testerCounter which hands out sequential
+    // tester numbers. Readable by staff so the dashboard can show what the
+    // next number will be; written only by Cloud Functions, since the counter
+    // is allocated inside a transaction and must never be set by a client.
+    match /meta/{metaId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------ audit trail
+    // Append-only record of every privileged action, written by Cloud
+    // Functions. No client write path at all.
+    match /audit/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Default deny for anything not explicitly matched above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

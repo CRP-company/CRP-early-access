@@ -1,0 +1,38 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "crp-tester-email",
+	"main": "src/index.js",
+	"compatibility_date": "2026-09-26",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	/**
+	 * Environment Variables
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 *
+	 * Only non-sensitive values live here. RESEND_API_KEY is deliberately
+	 * absent — set it as an encrypted secret:
+	 *   npx wrangler secret put RESEND_API_KEY
+	 * For local development put it in .dev.vars (gitignored).
+	 */
+	"vars": {
+		"ALLOWED_ORIGINS": "https://crp-company.github.io",
+		"CRP_EMAIL_FROM": "CRP Tester Program <testing@crp.company>",
+		"FIREBASE_PROJECT_ID": "crp-cuby-display"
+	}
+	/**
+	 * Static Assets
+	 * https://developers.cloudflare.com/workers/static-assets/binding/
+	 */
+	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
+	/**
+	 * Service Bindings (communicate between multiple Workers)
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 */
+	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+}

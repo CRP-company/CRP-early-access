@@ -1,0 +1,25 @@
+# Local development secrets for `wrangler dev`.
+#
+# Copy to `.dev.vars` (gitignored) and add your real key:
+#
+#   cp .dev.vars.example .dev.vars
+#
+# Never commit `.dev.vars`. For the deployed Worker use an encrypted secret:
+#
+#   npx wrangler secret put RESEND_API_KEY
+
+# Get yours at https://resend.com/api-keys
+RESEND_API_KEY=re_replace_me
+
+# Firebase service account, for the admin acceptance routes (/accept,
+# /tester-status). Not needed for the public /send route.
+#
+# This key bypasses Firestore security rules — the same privilege the Cloud
+# Functions had — so scope it to the collections it needs and rotate it.
+# Create a custom role granting only:
+#   clouddatastore.entities.get / create / update / list
+# on projects/crp-cuby-display/databases/(default)/documents
+#
+# Must be a single line, since .dev.vars is line-based. Encode it with:
+#   node -e "process.stdout.write(JSON.stringify(require('./key.json')))"
+FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"crp-cuby-display","private_key":"-----BEGIN PRIVATE KEY-----\nREPLACE_ME\n-----END PRIVATE KEY-----\n","client_email":"crp-tester-worker@crp-cuby-display.iam.gserviceaccount.com"}

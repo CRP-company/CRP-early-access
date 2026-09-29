@@ -1,0 +1,255 @@
+:root {
+  --bg: #f6f6f4;
+  --surface: #ffffff;
+  --border: #e2e2df;
+  --text: #1a1a1a;
+  --muted: #6f6f6b;
+  --accent: #000000;
+  --ok-bg: #e8f5e9;
+  --ok-fg: #1b5e20;
+  --warn-bg: #fff4e5;
+  --warn-fg: #8a5300;
+  --danger-bg: #fdecea;
+  --danger-fg: #a1201a;
+  --radius: 10px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 { font-size: 1.5rem; font-weight: 500; }
+h2 { font-size: 1.05rem; font-weight: 500; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+.mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.78rem; }
+.empty { text-align: center; color: var(--muted); padding: 2rem 0; }
+
+/* ---------------------------------------------------------------- login */
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1.5rem;
+}
+
+.login__card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.login__card h1 { margin-bottom: 0.15rem; }
+
+.login__card label {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.4rem;
+}
+
+.login__card input,
+.login__card select {
+  font: inherit;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.login__card input:focus,
+.login__card select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.login__badge {
+  display: inline-block;
+  justify-self: start;
+  font-weight: 700;
+  font-size: 0.8rem;
+  letter-spacing: 0.5px;
+  border: 1px solid var(--border);
+  border-radius: 40px;
+  padding: 0.25rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.login__badge--sm { margin-bottom: 0.35rem; }
+
+.login__error {
+  color: var(--danger-fg);
+  font-size: 0.85rem;
+  min-height: 1.2rem;
+}
+
+/* ------------------------------------------------------------------ app */
+
+.app { max-width: 1180px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+.app__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.75rem;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.25rem 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.panel__head select {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.panel__hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.35rem 0 1rem;
+}
+
+.count {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 40px;
+  padding: 0.05rem 0.5rem;
+  margin-left: 0.3rem;
+  vertical-align: middle;
+}
+
+.count--active { background: var(--ok-bg); border-color: transparent; color: var(--ok-fg); }
+
+/* --------------------------------------------------------------- tables */
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+
+th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.7rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+tr:last-child td { border-bottom: none; }
+td.actions { white-space: nowrap; text-align: right; }
+td.actions .btn { margin-left: 0.35rem; }
+
+/* -------------------------------------------------------- buttons/pills */
+
+.btn {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.btn:hover:not(:disabled) { background: var(--bg); }
+.btn:disabled { opacity: 0.55; cursor: progress; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  margin-top: 0.6rem;
+}
+
+.btn--primary:hover:not(:disabled) { background: #262626; }
+
+.btn--approve { border-color: #b7d8b9; background: var(--ok-bg); color: var(--ok-fg); }
+.btn--approve:hover:not(:disabled) { background: #d8ecd9; }
+
+.btn--reject,
+.btn--deactivate { border-color: #f0c2be; background: var(--danger-bg); color: var(--danger-fg); }
+.btn--reject:hover:not(:disabled),
+.btn--deactivate:hover:not(:disabled) { background: #f9dcda; }
+
+.pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  border-radius: 40px;
+  padding: 0.15rem 0.6rem;
+  white-space: nowrap;
+}
+
+.pill--pending { background: var(--warn-bg); color: var(--warn-fg); }
+.pill--approved, .pill--active { background: var(--ok-bg); color: var(--ok-fg); }
+.pill--rejected, .pill--inactive { background: var(--danger-bg); color: var(--danger-fg); }
+
+/* ---------------------------------------------------------------- toast */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translate(-50%, 1rem);
+  max-width: min(90vw, 460px);
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.88rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 20;
+}
+
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast--error { background: var(--danger-fg); }
+.toast--warn { background: var(--warn-fg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { transition: none; }
+}

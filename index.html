@@ -111,6 +111,21 @@
       margin-top: 0.5rem;
       max-width: 620px;
     }
+    /* Honeypot: must stay in the DOM for the bot check, but never rendered.
+       position:absolute + clip keeps it out of the accessibility tree and the
+       tab order, unlike display:none which some bots skip anyway. */
+    .hp-field {
+      position: absolute !important;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
     .form-row {
       display: flex;
       flex-wrap: wrap;
@@ -341,8 +356,7 @@
       white-space: nowrap;
       word-wrap: normal;
       direction: ltr;
-      color: #439d58;
-      border-radius: 50%;
+      color: #486997;
       width: 2.5rem;
       height: 2.5rem;
       align-items: center;
@@ -366,7 +380,7 @@
       max-width: 30ch;
     }
 
-    /* what do testers get — numbered outlined cards, left aligned */
+    /* what do testers get — four-step program journey, card as the endpoint */
     .perks-section {
       margin-bottom: 5rem;
     }
@@ -376,52 +390,183 @@
       font-size: clamp(1.6rem, 3.6vw, 2.6rem);
       line-height: 1.15;
       color: #000000;
-      margin-bottom: 1.25rem;
+      margin-bottom: 1rem;
     }
-    .perks-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
-    }
-    .perk {
-      background: #f1f1f1;
-      border-radius: 28px;
-      padding: 2.25rem 2rem;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      text-align: left;
-      gap: 0.85rem;
-      transition: border-color 0.2s ease, transform 0.2s ease;
-    }
-
-    .perk-num {
-      font-family: 'Space Grotesk', sans-serif;
-      font-weight: 500;
+    .perks-lede {
       font-size: 1.1rem;
-      line-height: 1;
-      color: #b4b4b4;
-    }
-    .perk h3 {
-      font-family: 'Bitcount Single', system-ui;
-      font-weight: 400;
-      font-size: 1.15rem;
-      letter-spacing: 0.06em;
-      line-height: 1.25;
-      color: #000000;
-      text-transform: uppercase;
-    }
-    .perk p {
-      font-size: 0.95rem;
       line-height: 1.5;
       color: #4a4a4a;
-      max-width: 40ch;
+      max-width: 620px;
+      margin-bottom: 2.75rem;
+    }
+
+    /* four full-height steps stacked down the page. Each one is always a row:
+       copy and image sit side by side at every screen size, and nothing joins
+       them together. */
+    .perks-rail {
+      --rail-gap: 2.5rem;
+      --num-size: clamp(2.5rem, 4vw, 3.4rem);
+
+      list-style: none;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: var(--rail-gap);
+    }
+
+    .perk {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: minmax(0, 1fr);
+      column-gap: clamp(2rem, 5vw, 5rem);
+      align-items: stretch;
+      height: 100dvh;
+      min-width: 0;
+      background-color: #f1f1f1;
+      padding: 5%;
+      border-radius: 25px;
+    }
+
+    /* the copy always comes first in the DOM; the grid column it lands in
+       decides which side it reads on, so tab and screen-reader order still
+       run text-then-image on every step */
+    .perk > .perk-copy { grid-column: 1; grid-row: 1; align-self: start; }
+    .perk > .perk-media { grid-column: 2; grid-row: 1; }
+    /* .perk--flip swaps the two tracks: image left, text right */
+    .perk--flip > .perk-media { grid-column: 1; }
+    .perk--flip > .perk-copy { grid-column: 2; }
+
+    .perk-num {
+      font-family: 'Bitcount Single', system-ui;
+      font-weight: 400;
+      font-size: var(--num-size);
+      line-height: 0.9;
+      letter-spacing: -0.02em;
+      color: #0a0a0a;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 0.75rem;
+    }
+
+    .perk h3 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 500;
+      font-size: 0.95rem;
+      letter-spacing: 0.08em;
+      line-height: 1.4;
+      color: #000000;
+      text-transform: uppercase;
+      margin-bottom: 0.7rem;
+    }
+    
+    .perk p {
+      font-size: 0.95rem;
+      line-height: 1.6;
+      color: #4a4a4a;
+      max-width: 32ch;
+    }
+
+    /* each image holds its own full-height track and is contained rather than
+       cropped — the art is white-backed, so it sits straight onto the page */
+    .perk-media {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 0;
+      height: 100%;
+    }
+
+    .perk-media img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      /* a replaced element will not shrink below its intrinsic size inside a
+         flex row without this, which is what let the portrait art overflow */
+      min-height: 0;
+      min-width: 0;
+      max-width: 100%;
+      object-fit: contain;
+      border-radius: 9px;
+    }
+
+    /* step 03: the one moment the page drops to pure black and white */
+    .perk--bw .perk-media img {
+      filter: grayscale(1);
+    }
+
+    /* step 03 again: here the image owns its half of the card outright, with no
+       padding and no gap around it. The card drops its padding and the copy
+       takes it over, so the media stays an ordinary grid item filling its whole
+       track — bleed edges are far messier to fake on a grid child. The copy's
+       column is exactly half the card, so 10% there is the 5%-of-card inset
+       every other step gets, and the copy lands in the same place as before. */
+    .perk.perk--fill {
+      padding: 0;
+      /* the copy's own padding is the separation now, so the track gap goes. The
+         doubled class beats the narrow-screen `.perk` rule further down, which
+         would otherwise reinstate a gap here. */
+      column-gap: 0;
+      /* clips the image to the card radius instead of squaring off the corners */
+      overflow: hidden;
+    }
+    .perk.perk--fill > .perk-copy {
+      padding: 10%;
+    }
+    .perk.perk--fill > .perk-media img {
+      /* the art is portrait and the half is nearly square, so cover crops a
+         sliver instead of letterboxing it against the card */
+      object-fit: cover;
+      border-radius: 0;
+    }
+
+    /* step 04: the card is the destination, so it sits centred in its half
+       with room to breathe either side instead of stretching edge to edge */
+    .perk:last-of-type .perk-media {
+      padding-left: clamp(0rem, 4vw, 4rem);
+    }
+    .perk:last-of-type .perk-media img {
+      max-width: min(100%, 30rem);
+      margin: 0 auto;
+    }
+
+    /* the steps arrive in sequence once the rail scrolls into view.
+       The pending state is only ever added by JS, so the section can never
+       be left invisible if the script fails to run. */
+    .perk {
+      transition: opacity 0.55s ease, transform 0.55s ease;
+    }
+
+    .perk.CRPtester {
+      background-image: linear-gradient(to bottom, #f1f1f1, white 80%);
+      border: #f1f1f1 solid 5px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .perks-rail--pending .perk {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    .perks-rail--pending.is-inview .perk {
+      opacity: 1;
+      transform: none;
+    }
+    .perk:nth-of-type(1) { transition-delay: 0s; }
+    .perk:nth-of-type(2) { transition-delay: 80ms; }
+    .perk:nth-of-type(3) { transition-delay: 160ms; }
+    .perk:nth-of-type(4) { transition-delay: 240ms; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .perk {
+        transition: none;
+      }
+      .perks-rail--pending .perk {
+        opacity: 1;
+        transform: none;
+      }
     }
 
     @media (max-width: 880px) {
-      .perks-grid {
-        grid-template-columns: 1fr;
-      }
       .container {
         padding: 2rem 1.5rem;
       }
@@ -446,9 +591,34 @@
         grid-template-columns: repeat(2, 1fr);
       }
     }
+    /* narrow screens keep the row — the two tracks only get tighter, so image
+       and text stay opposite each other all the way down */
+    @media (max-width: 880px) {
+      .perks-rail {
+        --rail-gap: 2rem;
+      }
+      .perk {
+        column-gap: clamp(1rem, 4vw, 2rem);
+        /* 70vh of an already-short phone screen is a lot of scrolling, so the
+           steps ease off that floor down here — but they stay a row */
+        height: 60vh;
+        min-height: 21rem;
+      }
+      .perk p {
+        max-width: 34ch;
+      }
+      .perk:last-of-type .perk-media {
+        padding-left: 0;
+      }
+    }
+
     @media (max-width: 540px) {
       h1 {
         font-size: 2.5rem;
+      }
+      .perks-rail {
+        --num-size: clamp(2.25rem, 13vw, 3rem);
+        --rail-gap: 1.75rem;
       }
       .expect-section {
         grid-template-columns: 1fr;
@@ -478,8 +648,8 @@
       Join the early access program to receive beta features, experimental tools, and priority product updates
     </div>
 
-    <!-- Formspree signup form with consent checkbox -->
-    <form action="" method="POST" class="signup-form" id="signupForm">
+    <!-- Early access signup form. Submitted by js/signup.js into Firestore. -->
+    <form action="" method="POST" class="signup-form" id="signupForm" novalidate>
       <div class="form-row">
         <div class="input-group">
           <label>Full name</label>
@@ -489,7 +659,15 @@
           <label>Email address</label>
           <input type="email" name="email" required placeholder="test@gmail.com" autocomplete="email">
         </div>
-        <button type="submit" class="btn-primary" id="joinButton" disabled>Join</button>
+        <button type="submit" class="btn-primary" id="joinButton" disabled>Send request</button>
+      </div>
+
+      <!-- Honeypot. Hidden from humans, so a real submission always leaves it
+           empty; a filled value identifies a bot. Kept out of the tab order and
+           hidden from screen readers so it never affects a real user. -->
+      <div class="hp-field" aria-hidden="true">
+        <label for="website">Website</label>
+        <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
       </div>
       
       <!-- Consent checkbox -->
@@ -510,12 +688,12 @@
     <div class="expectation">
       <span class="expect-icon" aria-hidden="true">check_circle</span>
       <h3>STAY ACTIVE</h3>
-      <p>Tester status is based on participation. Extended inactivity may cause your tester status and benefits to become inactive.</p>
+      <p>Activity will be expressed as the number of your comments and reviews each month. Inactive users who do not meet the conditions will be removed from the program.</p>
     </div>
     <div class="expectation">
       <span class="expect-icon" aria-hidden="true">check_circle</span>
-      <h3>GIVE FEEDBACK</h3>
-      <p>Share useful feedback when we ask for it.</p>
+      <h3>HONEST FEEDBACK</h3>
+      <p>Try to write useful comments that can help us develop.</p>
     </div>
     <div class="expectation">
       <span class="expect-icon" aria-hidden="true">check_circle</span>
@@ -527,28 +705,48 @@
   <!-- What do testers get -->
   <div class="perks-section">
     <h2>What do testers get?</h2>
-    <div class="perks-grid">
-      <div class="perk">
-        <span class="perk-num" aria-hidden="true">01</span>
-        <h3>Tester card</h3>
-        <p>Accepted testers receive a unique digital CRP Tester Card.</p>
-      </div>
-      <div class="perk">
-        <span class="perk-num" aria-hidden="true">02</span>
-        <h3>Early access</h3>
-        <p>Get features and prototypes before release</p>
-      </div>
-      <div class="perk">
-        <span class="perk-num" aria-hidden="true">03</span>
-        <h3>Tester pricing</h3>
-        <p>Access exclusive discounts on selected CRP products.</p>
-      </div>
-      <div class="perk">
-        <span class="perk-num" aria-hidden="true">04</span>
-        <h3>Direct influence</h3>
-        <p>Your feedback can influence what we build and how we build it.</p>
-      </div>
-    </div>
+    <ol class="perks-rail" role="list">
+      <li class="perk perk--flip">
+        <div class="perk-copy">
+          <span class="perk-num" aria-hidden="true">01</span>
+          <h3>Join the development</h3>
+          <p>Get physical prototypes for free and early access to beta features before anyone else.</p>
+        </div>
+        <div class="perk-media">
+          <img src="assets/development.png" alt="A pale blue butterfly in flight" loading="lazy" decoding="async" width="736" height="736">
+        </div>
+      </li>
+      <li class="perk">
+        <div class="perk-copy">
+          <span class="perk-num" aria-hidden="true">02</span>
+          <h3>Tester pricing</h3>
+          <p>Exclusive discounts on selected CRP products.</p>
+        </div>
+        <div class="perk-media">
+          <img src="assets/pricing.png" alt="Tester pricing on discounted CRP products" loading="lazy" decoding="async" width="735" height="1058">
+        </div>
+      </li>
+      <li class="perk perk--flip perk--bw perk--fill">
+        <div class="perk-copy">
+          <span class="perk-num" aria-hidden="true">03</span>
+          <h3>Direct influence</h3>
+          <p>Your feedback can influence what we build and how we build it.</p>
+        </div>
+        <div class="perk-media">
+          <img src="assets/influence.jpg" alt="A crowd with one tester picked out in blue" loading="lazy" decoding="async" width="1200" height="1500">
+        </div>
+      </li>
+      <li class="perk CRPtester">
+        <div class="perk-copy">
+          <span class="perk-num" aria-hidden="true">04</span>
+          <h3>Tester card</h3>
+          <p>A CRP tester card for every accepted tester — your pass into the program, and into Google Wallet.</p>
+        </div>
+        <div class="perk-media">
+          <img src="assets/CRPtesterCARD-trim.png" alt="The CRP tester card" loading="lazy" decoding="async" width="960" height="598">
+        </div>
+      </li>
+    </ol>
   </div>
 
   <!-- Image section -->
@@ -574,38 +772,37 @@
   </footer>
 </div>
 
+<!-- Worker endpoint config, read by js/signup.js. Classic script so the global
+     is set before the module below executes. -->
+<script src="js/worker-config.js"></script>
+<script type="module" src="js/signup.js"></script>
 <script>
-  // Enable/disable Join button based on checkbox
-  const joinBtn = document.getElementById('joinButton');
-  const consentCheck = document.getElementById('consentCheckbox');
-  const form = document.getElementById('signupForm');
-  const messageDiv = document.getElementById('formMessage');
+  // Reveal the perks rail in step order as it scrolls into view.
+  // The hidden state lives behind a class only this script sets, so if the
+  // script never runs (or is blocked) the rail just renders in its final state.
+  const perksRail = document.querySelector('.perks-rail');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  function toggleJoinButton() {
-    joinBtn.disabled = !consentCheck.checked;
+  if (perksRail && !reduceMotion && 'IntersectionObserver' in window) {
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        perksRail.classList.add('is-inview');
+        perksRail.classList.remove('perks-rail--pending');
+        observer.disconnect();
+      }
+    }, { threshold: 0.2 });
+
+    // Only hide the steps now that we are certain we will un-hide them.
+    perksRail.classList.add('perks-rail--pending');
+    observer.observe(perksRail);
+
+    // Safety net, in case the section is never scrolled to or the observer misfires.
+    window.setTimeout(() => {
+      perksRail.classList.add('is-inview');
+      perksRail.classList.remove('perks-rail--pending');
+      observer.disconnect();
+    }, 3000);
   }
-  consentCheck.addEventListener('change', toggleJoinButton);
-  toggleJoinButton(); // initial state
-
-  // Handle form submission to show custom success/error message (optional)
-  form.addEventListener('submit', async (e) => {
-    // Formspree will handle the actual POST, but we can show a loading state
-    joinBtn.disabled = true;
-    joinBtn.textContent = 'Sending...';
-    messageDiv.classList.remove('show', 'error');
-    messageDiv.textContent = '';
-    
-    // Let the native form submit to Formspree
-    // If you want to handle AJAX, you could use fetch, but simpler: let it submit.
-    // We'll add a small timeout to re-enable if something fails, but it's fine.
-    setTimeout(() => {
-      // This runs only if the page doesn't navigate (if fetch is used, but we are using standard submit)
-      // Not critical because page will reload on success.
-    }, 500);
-  });
-
-  // If the form fails to submit (e.g., network error) we could catch, but native submit handles it.
-  console.log('Formspree early access — replace YOUR_FORM_ID with your actual endpoint');
 </script>
 </body>
 </html>

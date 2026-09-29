@@ -1,0 +1,17 @@
+{
+  "name": "crp-tester-email",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.0.0",
+    "vitest": "~4.1.0",
+    "wrangler": "^4.143.0"
+  }
+}

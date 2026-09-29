@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Staff-only page: keep it out of search indexes. -->
+  <meta name="robots" content="noindex, nofollow">
+  <title>CRP · Early access admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/admin.css">
+</head>
+<body>
+
+  <!-- Sign in -->
+  <section id="login-view" class="login">
+    <form id="login-form" class="login__card">
+      <span class="login__badge">CRP</span>
+      <h1>Early access admin</h1>
+      <p class="muted">Staff only. Access requires the admin claim.</p>
+
+      <label for="login-email">Email</label>
+      <input id="login-email" type="email" autocomplete="username" required>
+
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+
+      <button type="submit" class="btn btn--primary">Sign in</button>
+      <p id="login-error" class="login__error" role="alert"></p>
+    </form>
+  </section>
+
+  <!-- Dashboard -->
+  <main id="app-view" class="app" hidden>
+    <header class="app__bar">
+      <div>
+        <span class="login__badge login__badge--sm">CRP</span>
+        <h1>Early access</h1>
+      </div>
+      <button id="sign-out" class="btn">Sign out</button>
+    </header>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2>Requests <span class="count" id="requests-count">0</span></h2>
+        <select id="request-filter" aria-label="Filter requests by status">
+          <option value="pending" selected>Pending</option>
+          <option value="all">All</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+        </select>
+      </div>
+      <p class="panel__hint">
+        Raw signups from the public form. Approving one creates a tester below.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Applicant</th><th>Received</th><th>Status</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="requests-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2>
+          Testers <span class="count" id="testers-count">0</span>
+          <span class="count count--active" id="active-count">0 active</span>
+        </h2>
+        <select id="tester-filter" aria-label="Filter testers by active status">
+          <option value="all" selected>All</option>
+          <option value="active">Active only</option>
+          <option value="inactive">Not active only</option>
+        </select>
+      </div>
+      <p class="panel__hint">
+        Accepted testers. The <strong>active</strong> flag drives the Google Wallet
+        card state — deactivating issues a revoked pass.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Tester</th><th>Status</th><th>Since</th><th>Reason</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="testers-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Worker endpoint for the acceptance flow. Classic script so the global is
+       set before the module below runs. -->
+  <script src="js/worker-config.js"></script>
+  <script type="module" src="js/admin.js"></script>
+</body>
+</html>

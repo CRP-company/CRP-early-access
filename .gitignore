@@ -1,9 +1,37 @@
-# Google Wallet service account credentials
-crp-tester-card-4af9e80eb67f.json
+# Google Wallet / Firebase service account credentials
+crp-tester-card-*.json
+*-firebase-adminsdk-*.json
+serviceAccount*.json
+
+# NOTE: js/firebase-config.js and admin/js/firebase-config.js are intentionally
+# COMMITTED. They are Firebase *web* configs, which are public identifiers by
+# design and grant no data access on their own — firestore.rules is the
+# protection. This repo is a static site served straight to visitors, so the
+# config has to be present in the deployment. Never gitignore service account
+# keys or Admin SDK credentials; those are the real secrets.
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+*-debug.log
+database-debug.log
+.firebaserc.bak
 
 # Node
 node_modules/
+functions/node_modules/
+
+# Emulator / test artifacts
+firestore-debug.log
+coverage/
 
 # Environment variables
 .env
 .env.*
+# ...but the example template must stay committed, or there is nothing to
+# copy from. This negation has to come after the patterns above to win.
+!.env.example
+!**/.env.example

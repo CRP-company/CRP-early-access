@@ -1,6 +1,39 @@
 {
+  "name": "crp-early-access",
+  "description": "CRP early-access landing page with a Firebase backend",
+  "private": true,
+  "scripts": {
+    "emulators": "firebase emulators:start --only firestore,functions,auth",
+    "dev": "node scripts/dev-server.js",
+    "fb": "firebase",
+    "fb:login": "firebase login",
+    "fb:log": "firebase functions:log --only onRequestCreated",
+    "fb:secrets": "firebase functions:secrets:access RESEND_API_KEY",
+    "fb:db": "firebase firestore:databases:list --format json",
+    "test": "npm run test:exports && npm run test:email && npm run test:rules",
+    "test:rules": "firebase emulators:exec --only firestore \"node tests/rules.test.js\"",
+    "test:email": "node tests/email.test.js",
+    "diagnose:email": "node scripts/diagnose-email.js",
+    "test:email:preview": "node tests/email-preview.js",
+    "test:wallet": "node scripts/verify-wallet.js",
+    "test:exports": "node scripts/verify-exports.js",
+    "test:testers": "firebase emulators:exec --only firestore \"node tests/tester-status.test.js\"",
+    "test:e2e": "node tests/e2e-signup.js",
+    "test:e2e:worker-failure": "node tests/e2e-worker-failure.js",
+    "test:worker": "npm --prefix crp-tester-email test -- --run",
+    "deploy": "firebase deploy",
+    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes",
+    "deploy:functions": "firebase deploy --only functions"
+  },
   "dependencies": {
     "googleapis": "^182.0.0",
     "jsonwebtoken": "^9.0.3"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0",
+    "firebase-admin": "^14.5.0",
+    "firebase-tools": "^15.32.0",
+    "playwright": "^1.63.0"
   }
 }
