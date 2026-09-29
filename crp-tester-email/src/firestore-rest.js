@@ -396,6 +396,39 @@ export function createFirestore(secretJson, projectId) {
     }
   }
 
+  /**
+   * Recover a rejected request's marker without changing the historical request.
+   * This is safe to call repeatedly and only removes a marker still owned by it.
+   */
+  async function releaseRejectedRequestMarker({ requestId, markerCollection, markerId }) {
+    const transaction = await beginTransaction();
+    try {
+      const request = await getDocument("requests", requestId, { transaction });
+      if (!request || request.status !== "rejected") {
+        const error = new Error("Request is no longer rejected.");
+        error.status = 409;
+        throw error;
+      }
+
+      const marker = await getDocument(markerCollection, markerId, { transaction });
+      if (marker?.requestId !== requestId) {
+        await rollback(transaction);
+        return { released: false };
+      }
+
+      await commit(transaction, [
+        {
+          delete: docPath(markerCollection, markerId),
+          currentDocument: { updateTime: marker.updateTime },
+        },
+      ]);
+      return { released: true };
+    } catch (error) {
+      await rollback(transaction);
+      throw error;
+    }
+  }
+
   return {
     getDocument,
     createDocument,
@@ -406,6 +439,7 @@ export function createFirestore(secretJson, projectId) {
     rollback,
     removeTester,
     rejectRequestAndReleaseMarker,
+    releaseRejectedRequestMarker,
     docName,
   };
 }

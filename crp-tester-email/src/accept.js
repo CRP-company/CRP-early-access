@@ -137,6 +137,25 @@ export async function decideRequest(store, { requestId, decision, note, actorUid
   const request = await store.getDocument(REQUESTS, requestId);
   if (!request) throw new AcceptError(404, "No such request.");
   if (request.status !== "pending") {
+    if (request.status === "rejected" && decision === "rejected") {
+      let releasedMarker = false;
+      if (request.email) {
+        try {
+          const result = await store.releaseRejectedRequestMarker({
+            requestId,
+            markerCollection: REQUEST_EMAILS,
+            markerId: await hashEmail(request.email),
+          });
+          releasedMarker = result.released;
+        } catch (error) {
+          if (error && (error.status === 409 || error.status === 412)) {
+            throw new AcceptError(409, "This request changed while retrying rejection.");
+          }
+          throw error;
+        }
+      }
+      return { requestId, status: "rejected", emailed: false, releasedMarker };
+    }
     throw new AcceptError(409, `This request was already ${request.status}.`);
   }
 

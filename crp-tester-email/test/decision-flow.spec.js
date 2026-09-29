@@ -75,6 +75,19 @@ function memoryStore(seed = {}) {
       if (released) docs.delete(markerKey);
       return { released };
     },
+    async releaseRejectedRequestMarker({ requestId, markerCollection, markerId }) {
+      const request = docs.get(`requests/${requestId}`);
+      if (!request || request.status !== "rejected") {
+        const e = new Error("request is no longer rejected");
+        e.status = 409;
+        throw e;
+      }
+      const markerKey = `${markerCollection}/${markerId}`;
+      const marker = docs.get(markerKey);
+      const released = marker?.requestId === requestId;
+      if (released) docs.delete(markerKey);
+      return { released };
+    },
     async listCollection(c) {
       return [...docs.entries()]
         .filter(([k]) => k.startsWith(`${c}/`))
@@ -332,11 +345,65 @@ describe("REJECTION", () => {
       requestId: "r2",
       createdAt: "2026-09-29T00:00:00.000Z",
     });
-    await expect(
-      decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() }),
-    ).rejects.toMatchObject({ status: 409 });
+    const retry = await decideRequest(store, {
+      requestId: "r1",
+      decision: "rejected",
+      ...actor,
+      env: env(),
+    });
+    expect(retry).toMatchObject({ status: "rejected", releasedMarker: false, emailed: false });
     expect(store.docs.get("requests/r1").status).toBe("rejected");
     expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r2");
+  });
+
+  it("retries a rejection without changing history or repeating audit/email", async () => {
+    const markerId = await markerKey("alex@example.com");
+    const store = memoryStore({
+      "requests/r1": REQ(),
+      [`requestEmails/${markerId}`]: { requestId: "r1" },
+    });
+    const sent = stubResend();
+
+    await decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() });
+    const rejectedRequest = store.docs.get("requests/r1");
+    const auditCount = [...store.docs.keys()].filter((key) => key.startsWith("audit/")).length;
+    const retry = await decideRequest(store, {
+      requestId: "r1",
+      decision: "rejected",
+      ...actor,
+      env: env(),
+    });
+
+    expect(retry).toMatchObject({ status: "rejected", releasedMarker: false, emailed: false });
+    expect(store.docs.get("requests/r1")).toEqual(rejectedRequest);
+    expect([...store.docs.keys()].filter((key) => key.startsWith("audit/"))).toHaveLength(auditCount);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("recovers an exact-owned marker left by an earlier rejection without editing the request", async () => {
+    const markerId = await markerKey("alex@example.com");
+    const store = memoryStore({
+      "requests/r1": REQ({
+        status: "rejected",
+        note: "Original review",
+        reviewedAt: "2026-09-02T00:00:00.000Z",
+      }),
+      [`requestEmails/${markerId}`]: { requestId: "r1" },
+    });
+    const rejectedRequest = store.docs.get("requests/r1");
+    const sent = stubResend();
+
+    const result = await decideRequest(store, {
+      requestId: "r1",
+      decision: "rejected",
+      ...actor,
+      env: env(),
+    });
+
+    expect(result).toMatchObject({ status: "rejected", releasedMarker: true, emailed: false });
+    expect(store.docs.has(`requestEmails/${markerId}`)).toBe(false);
+    expect(store.docs.get("requests/r1")).toEqual(rejectedRequest);
+    expect(sent).toHaveLength(0);
   });
 
   it("does not release a marker now owned by a newer request", async () => {

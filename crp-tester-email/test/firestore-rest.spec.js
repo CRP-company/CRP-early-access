@@ -198,6 +198,88 @@ describe("rejectRequestAndReleaseMarker", () => {
   });
 });
 
+describe("releaseRejectedRequestMarker", () => {
+  function stubTransaction(requestStatus, markerRequestId, commitStatus = 200) {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async (url, init = {}) => {
+      const parsed = new URL(String(url));
+      calls.push({ url: parsed, init });
+      if (parsed.href.endsWith(":beginTransaction")) {
+        return new Response(JSON.stringify({ transaction: "txn-retry" }), { status: 200 });
+      }
+      if (parsed.pathname.endsWith("/requests/req-1")) {
+        return new Response(JSON.stringify({
+          fields: encodeFields({ status: requestStatus }),
+          updateTime: "request-version-1",
+        }), { status: 200 });
+      }
+      if (parsed.pathname.endsWith("/requestEmails/hash-1")) {
+        return new Response(JSON.stringify({
+          fields: encodeFields({ requestId: markerRequestId }),
+          updateTime: "marker-version-2",
+        }), { status: 200 });
+      }
+      if (parsed.href.endsWith(":commit")) {
+        return new Response(commitStatus === 200 ? "{}" : "conflict", { status: commitStatus });
+      }
+      if (parsed.href.endsWith(":rollback")) {
+        return new Response("{}", { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${parsed.href}`);
+    });
+  }
+
+  it("deletes only the exact-owned marker and leaves the request untouched", async () => {
+    stubTransaction("rejected", "req-1");
+    const store = createFirestore(SECRET, "crp-cuby-display");
+
+    const result = await store.releaseRejectedRequestMarker({
+      requestId: "req-1",
+      markerCollection: "requestEmails",
+      markerId: "hash-1",
+    });
+
+    expect(result.released).toBe(true);
+    const reads = calls.filter(({ init }) => !init.method);
+    expect(reads).toHaveLength(2);
+    expect(reads.every(({ url }) => url.searchParams.get("transaction") === "txn-retry")).toBe(true);
+    const writes = JSON.parse(calls.find(({ url }) => url.href.endsWith(":commit")).init.body).writes;
+    expect(writes).toEqual([{
+      delete: "projects/crp-cuby-display/databases/(default)/documents/requestEmails/hash-1",
+      currentDocument: { updateTime: "marker-version-2" },
+    }]);
+  });
+
+  it("does not delete a marker owned by a newer request", async () => {
+    stubTransaction("rejected", "req-2");
+    const store = createFirestore(SECRET, "crp-cuby-display");
+
+    const result = await store.releaseRejectedRequestMarker({
+      requestId: "req-1",
+      markerCollection: "requestEmails",
+      markerId: "hash-1",
+    });
+
+    expect(result.released).toBe(false);
+    expect(calls.some(({ url }) => url.href.endsWith(":commit"))).toBe(false);
+    expect(calls.some(({ url }) => url.href.endsWith(":rollback"))).toBe(true);
+  });
+
+  it("refuses recovery when the request is not rejected", async () => {
+    stubTransaction("approved", "req-1");
+    const store = createFirestore(SECRET, "crp-cuby-display");
+
+    await expect(store.releaseRejectedRequestMarker({
+      requestId: "req-1",
+      markerCollection: "requestEmails",
+      markerId: "hash-1",
+    })).rejects.toMatchObject({ status: 409 });
+    expect(calls.some(({ url }) => url.href.endsWith(":commit"))).toBe(false);
+    expect(calls.some(({ url }) => url.href.endsWith(":rollback"))).toBe(true);
+  });
+});
+
 describe("project pinning still holds", () => {
   it("refuses a key for a different project", () => {
     const walletKey = JSON.stringify({ project_id: "crp-tester-card" });
