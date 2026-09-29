@@ -409,7 +409,9 @@ if (!isConfigured()) {
       /* fall through to the claim check below */
     }
 
-    if (user.getIdTokenResult().claims.admin !== true) {
+    const tokenResult = await user.getIdTokenResult();
+
+    if (tokenResult.claims.admin !== true) {
       await signOut(auth);
       els.loginError.textContent =
         "This account has no admin claim. Run: node scripts/set-admin-claim.js " + user.email;
