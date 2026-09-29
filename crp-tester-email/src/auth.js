@@ -13,6 +13,8 @@
  * `requireAdmin()` performed in the callable.
  */
 
+import { extractSpkiFromCertificate, pemCertificateToDer, looksLikeCertificate } from "./x509.js";
+
 const KEYS_URL =
   "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 
@@ -37,17 +39,6 @@ function base64UrlToBytes(segment) {
   return bytes;
 }
 
-function pemToArrayBuffer(pem) {
-  const body = pem
-    .replace(/-----BEGIN CERTIFICATE-----/g, "")
-    .replace(/-----END CERTIFICATE-----/g, "")
-    .replace(/\s+/g, "");
-  const binary = atob(body);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
 async function signingKeys() {
   if (cachedKeys && Date.now() - cachedAt < KEYS_TTL_MS) return cachedKeys;
 
@@ -57,9 +48,18 @@ async function signingKeys() {
   const json = await res.json();
   cachedKeys = {};
   for (const [kid, pem] of Object.entries(json)) {
+    // The endpoint serves X.509 certificates, but importKey("spki") wants the
+    // bare SubjectPublicKeyInfo inside one. Passing the whole certificate
+    // throws a DataError that Workers reports as "Invalid SPKI input", which
+    // turned every authenticated admin call into a 500. Extract the key first.
+    const der = pemCertificateToDer(pem);
+    const keyBytes = looksLikeCertificate(der)
+      ? extractSpkiFromCertificate(der)
+      : der;
+
     cachedKeys[kid] = await crypto.subtle.importKey(
       "spki",
-      pemToArrayBuffer(pem),
+      keyBytes,
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
       false,
       ["verify"],
