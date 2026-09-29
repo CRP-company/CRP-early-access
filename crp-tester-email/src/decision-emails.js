@@ -111,7 +111,9 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
   const bodyRows = `
           <tr>
             <td align="center" style="padding-bottom:8px;">
-              <h1 style="margin:0; font-size:34px; line-height:1.15; font-weight:600; letter-spacing:-0.5px; color:#000000;">You're in.</h1>
+              <h1 style="margin:0; font-size:34px; line-height:1.15; font-weight:600; letter-spacing:-0.5px; color:#000000;">
+                You're in. <span style="color:#22a447; font-size:30px; vertical-align:2px;">✓</span>
+              </h1>
             </td>
           </tr>
 
@@ -119,6 +121,17 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
             <td align="center" style="padding:20px 0 4px;">
               <p style="margin:0 0 18px; font-size:16px; color:#1a1a1a;">Hi ${greeting}</p>
               <p style="margin:0 0 18px; font-size:16px; color:#4a4a4a;">You're officially part of the CRP Testing Program.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:4px 0 24px;">
+              <img
+                src="https://crp-company.github.io/CRP-early-access/assets/CRPtesterCARD-trim.png"
+                alt="CRP Tester Card"
+                width="260"
+                style="display:block; width:260px; max-width:100%; height:auto; margin:0 auto; border:0; outline:none; text-decoration:none;"
+              >
             </td>
           </tr>
 
@@ -140,6 +153,7 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
               <p style="margin:0; font-size:16px; color:#4a4a4a;">The card may be updated during the program, so keep it in your wallet rather than as a screenshot.</p>
             </td>
           </tr>`;
+
 
   const text = [
     "You're in.",
