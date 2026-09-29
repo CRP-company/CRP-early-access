@@ -32,13 +32,40 @@ const DEFAULT_ALLOWED_ORIGINS = ["https://crp-company.github.io"];
 
 const DEFAULT_FROM = "CRP Tester Program <testing@crp.company>";
 
-const json = (status, payload) =>
+// Headers the browser may send. Authorization carries the Firebase ID token on
+// the admin routes, and a header outside this list is rejected by the browser
+// during preflight — before the request ever reaches the Worker.
+const ALLOWED_REQUEST_HEADERS = "Authorization, Content-Type";
+
+/**
+ * CORS response headers for an allowed origin.
+ *
+ * The origin is echoed back rather than sent as "*" because these routes are
+ * authenticated with a bearer token; a wildcard would let any site read them.
+ * `Vary: Origin` keeps caches from serving one origin's response to another.
+ */
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": ALLOWED_REQUEST_HEADERS,
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+  };
+}
+
+const json = (status, payload, origin) =>
   new Response(JSON.stringify(payload), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       // Never cache an API response.
       "Cache-Control": "no-store",
+      // The real response needs the header too, not just the preflight: without
+      // it the browser runs the request and then refuses to hand the body to
+      // JavaScript. Omitted entirely for a disallowed origin, so such a caller
+      // cannot read the body at all.
+      ...(origin ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" } : {}),
     },
   });
 
@@ -51,7 +78,13 @@ function allowedOrigins(env) {
     .filter(Boolean);
 }
 
-/** CORS preflight. Only the allowed origins receive the header. */
+/**
+ * CORS preflight. Only the allowed origins receive the header.
+ *
+ * The admin routes send `Authorization`, so it must appear in
+ * Access-Control-Allow-Headers here; a browser aborts a preflight whose response
+ * omits a header the request actually uses.
+ */
 function handleOptions(request, env) {
   const origin = request.headers.get("Origin");
   if (!isAllowedOrigin(origin, allowedOrigins(env))) {
@@ -59,12 +92,7 @@ function handleOptions(request, env) {
   }
   return new Response(null, {
     status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Max-Age": "86400",
-    },
+    headers: corsHeaders(origin),
   });
 }
 
@@ -76,19 +104,21 @@ function handleOptions(request, env) {
  * happens here, before any write: the caller's Firebase ID token must be valid
  * for this project and carry the `admin` claim.
  */
-async function handleAdmin(request, env, body, route) {
+async function handleAdmin(request, env, body, route, origin) {
   const projectId = env.FIREBASE_PROJECT_ID;
-  if (!projectId) return json(500, { ok: false, error: "Server not configured." });
+  if (!projectId) return json(500, { ok: false, error: "Server not configured." }, origin);
 
   const sa = env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!sa) return json(500, { ok: false, error: "Server not configured." });
+  if (!sa) return json(500, { ok: false, error: "Server not configured." }, origin);
 
   let admin;
   try {
     admin = await requireAdmin(request, projectId);
   } catch (error) {
     if (error instanceof AuthError) {
-      return json(error.status, { ok: false, error: error.message });
+      // Even a 401 needs a readable body, otherwise the dashboard shows a bare
+      // CORS failure instead of "sign in again".
+      return json(error.status, { ok: false, error: error.message }, origin);
     }
     throw error;
   }
@@ -100,7 +130,7 @@ async function handleAdmin(request, env, body, route) {
   if (route === "/accept") {
     const { requestId, decision, note } = body || {};
     if (!requestId || typeof requestId !== "string") {
-      return json(400, { ok: false, error: "requestId is required." });
+      return json(400, { ok: false, error: "requestId is required." }, origin);
     }
     const result = await decideRequest(store, {
       requestId,
@@ -109,13 +139,13 @@ async function handleAdmin(request, env, body, route) {
       actorUid: admin.uid,
       actorEmail: admin.email,
     });
-    return json(200, { ok: true, ...result });
+    return json(200, { ok: true, ...result }, origin);
   }
 
   // /tester-status
   const { testerId, status, active, reason } = body || {};
   if (!testerId || typeof testerId !== "string") {
-    return json(400, { ok: false, error: "testerId is required." });
+    return json(400, { ok: false, error: "testerId is required." }, origin);
   }
   const result = await setTesterStatus(store, {
     testerId,
@@ -124,7 +154,7 @@ async function handleAdmin(request, env, body, route) {
     reason,
     actorUid: admin.uid,
   });
-  return json(200, { ok: true, ...result });
+  return json(200, { ok: true, ...result }, origin);
 }
 
 export default {
@@ -164,30 +194,36 @@ export default {
       return json(403, { ok: false, error: "Origin not allowed." });
     }
 
+    // Past this point the origin is known-good, so echoing it back is safe and
+    // lets the browser read the response.
     let body = null;
     try {
       body = await request.json();
     } catch {
-      return json(400, { ok: false, error: "Invalid JSON body." });
+      return json(400, { ok: false, error: "Invalid JSON body." }, origin);
     }
 
     if (isAdminRoute) {
       try {
-        return await handleAdmin(request, env, body, url.pathname);
+        return await handleAdmin(request, env, body, url.pathname, origin);
       } catch (error) {
         const status = error && (error.status || error.statusCode);
         console.error(
           "admin route failed",
           JSON.stringify({ path: url.pathname, status, message: error && error.message }),
         );
-        return json(status && status < 600 ? status : 500, {
-          ok: false,
-          // Surface the real reason in dev so a misconfiguration is diagnosable
-          // from the response, while still keeping 5xx generic in production.
-          error: status === 409 || status === 404 || status === 400
-            ? error.message
-            : `Request failed: ${error && error.message}`,
-        });
+        return json(
+          status && status < 600 ? status : 500,
+          {
+            ok: false,
+            // Surface the real reason in dev so a misconfiguration is diagnosable
+            // from the response, while still keeping 5xx generic in production.
+            error: status === 409 || status === 404 || status === 400
+              ? error.message
+              : `Request failed: ${error && error.message}`,
+          },
+          origin,
+        );
       }
     }
 
@@ -195,7 +231,7 @@ export default {
     // which validates its own payload and never touches Firestore.
     const result = validateSignup(body);
     if (!result.ok) {
-      return json(400, { ok: false, error: result.error });
+      return json(400, { ok: false, error: result.error }, origin);
     }
 
     const { name, email, requestId } = result.value;
@@ -229,12 +265,12 @@ export default {
         "resend send failed",
         JSON.stringify({ requestId, status: sent.status, message: sent.message }),
       );
-      return json(502, { ok: false, error: "Could not send the confirmation email." });
+      return json(502, { ok: false, error: "Could not send the confirmation email." }, origin);
     }
 
     console.log("acknowledgement sent", JSON.stringify({ requestId, id: sent.id }));
 
-    return json(200, { ok: true, id: sent.id });
+    return json(200, { ok: true, id: sent.id }, origin);
   },
 };
 

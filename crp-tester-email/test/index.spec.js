@@ -118,6 +118,89 @@ describe("origin allow-list", () => {
     );
     expect(bad.status).toBe(403);
   });
+
+  // The admin dashboard sends the Firebase ID token in Authorization, which
+  // makes every /accept call a preflighted request. A preflight that omits
+  // Authorization is rejected by the browser before the request is ever sent,
+  // which is what broke the Approve button.
+  it("allows Authorization in the preflight, alongside Content-Type", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.test/accept", {
+        method: "OPTIONS",
+        headers: {
+          Origin: ORIGIN,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "authorization, content-type",
+        },
+      }),
+      env,
+      {},
+    );
+
+    expect(res.status).toBe(204);
+    const allowed = res.headers.get("Access-Control-Allow-Headers") || "";
+    // Header names are case-insensitive to the browser, so compare lowercased.
+    const lower = allowed.toLowerCase();
+    expect(lower).toContain("authorization");
+    expect(lower).toContain("content-type");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  });
+
+  it("never answers a preflight with a wildcard origin", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.test/accept", {
+        method: "OPTIONS",
+        headers: { Origin: ORIGIN },
+      }),
+      env,
+      {},
+    );
+    // These routes are bearer-token authenticated; "*" would let any site call
+    // them, so the specific origin must be echoed instead.
+    expect(res.headers.get("Access-Control-Allow-Origin")).not.toBe("*");
+  });
+
+  it("sets the CORS origin on the real response, not just the preflight", async () => {
+    // Without this the browser runs the request, then refuses to hand the body
+    // to JavaScript — the failure looks like a network error.
+    stubResend();
+    const res = await worker.fetch(sendRequest(validBody), env, {});
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  });
+
+  it("omits the CORS origin for a disallowed origin so the body stays unreadable", async () => {
+    const res = await worker.fetch(
+      sendRequest(validBody, { origin: "https://evil.example" }),
+      env,
+      {},
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("keeps a 401 readable so the dashboard can show the real reason", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.test/accept", {
+        method: "POST",
+        headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "req_1", decision: "approved" }),
+      }),
+      {
+        ...env,
+        FIREBASE_PROJECT_ID: "crp-cuby-display",
+        // Present but never used: requireAdmin rejects the missing token first.
+        FIREBASE_SERVICE_ACCOUNT_JSON: "{}",
+      },
+      {},
+    );
+
+    // No token supplied, so this is rejected by requireAdmin.
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+    // The body must be readable, otherwise the dashboard shows a CORS error
+    // instead of the real reason.
+    expect((await res.json()).ok).toBe(false);
+  });
 });
 
 describe("routing and methods", () => {
