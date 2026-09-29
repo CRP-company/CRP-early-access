@@ -138,6 +138,9 @@ async function handleAdmin(request, env, body, route, origin) {
       note,
       actorUid: admin.uid,
       actorEmail: admin.email,
+      // env is needed server-side to sign the Wallet pass and to send the
+      // decision email. Secrets are read here and never reach the browser.
+      env,
     });
     return json(200, { ok: true, ...result }, origin);
   }

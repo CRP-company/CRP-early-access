@@ -31,6 +31,8 @@ let keyPair;
 let store;
 let keysDoc;
 let accessTokenCalls = 0;
+let resendCalls = [];
+let walletKeyPair;
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -49,6 +51,8 @@ function decodeFields(fields) {
     // Timestamps round-trip as ISO strings, matching how the rest of the code
     // reads them back (request.createdAt is compared as a string).
     else if ("timestampValue" in f) out[k] = f.timestampValue;
+    // Nested maps, so `wallet` on a tester document survives the round trip.
+    else if ("mapValue" in f) out[k] = decodeFields(f.mapValue.fields);
   }
   return out;
 }
@@ -59,6 +63,15 @@ function encodeValue(value) {
   if (typeof value === "number") return { integerValue: String(value) };
   if (typeof value === "boolean") return { booleanValue: value };
   if (value instanceof Date) return { timestampValue: value.toISOString() };
+  // Nested maps, so a tester document round-trips its `wallet` sub-document.
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const fields = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) continue;
+      fields[k] = encodeValue(v);
+    }
+    return { mapValue: { fields } };
+  }
   return { stringValue: String(value) };
 }
 
@@ -122,6 +135,12 @@ function installFirestore() {
 
     if (url.includes("robot/v1/metadata/x509")) {
       return new Response(JSON.stringify(keysDoc), { status: 200 });
+    }
+    // Resend: captured rather than sent, so the decision emails can be asserted
+    // on. Deliberately not the Firestore or Worker branches above.
+    if (url.includes("api.resend.com")) {
+      resendCalls.push({ headers: init.headers || {}, body: JSON.parse(init.body) });
+      return json({ id: "resend-1" });
     }
     if (url === "https://oauth2.googleapis.com/token") {
       accessTokenCalls += 1;
@@ -234,8 +253,8 @@ const env = {
  */
 let serviceAccountJson = "";
 
-async function serviceAccountPem() {
-  const pkcs8 = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+async function serviceAccountPem(key = keyPair.privateKey) {
+  const pkcs8 = await crypto.subtle.exportKey("pkcs8", key);
   const b64 = Buffer.from(pkcs8).toString("base64").replace(/(.{64})/g, "$1\n");
   return (
     "-----BEGIN PRIVATE KEY-----\n" + b64 + "\n-----END PRIVATE KEY-----\n"
@@ -243,10 +262,16 @@ async function serviceAccountPem() {
 }
 
 const seedRequest = (over = {}) => {
+  // The full shape js/signup.js writes, so a decision can be asserted not to
+  // destroy any of it.
   store.docs.set("requests/r1", {
     name: "Alex Morgan",
     email: "alex@example.com",
+    consent: true,
     status: "pending",
+    source: "early-access-site",
+    userAgent: "test-agent",
+    website: "",
     createdAt: "2026-09-01T00:00:00.000Z",
     ...over,
   });
@@ -276,6 +301,7 @@ beforeEach(async () => {
   __resetKeyCache();
   __resetTokenCache();
   accessTokenCalls = 0;
+  resendCalls = [];
 
   // A genuine signing key, so getAccessToken() exercises real JWT signing.
   serviceAccountJson = JSON.stringify({
@@ -285,6 +311,25 @@ beforeEach(async () => {
     private_key: await serviceAccountPem(),
   });
   env.FIREBASE_SERVICE_ACCOUNT_JSON = serviceAccountJson;
+
+  // A separate key for the Wallet issuer, which lives in the crp-tester-card
+  // project — deliberately not the Firebase project, exactly as in production.
+  walletKeyPair = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON = JSON.stringify({
+    type: "service_account",
+    project_id: "crp-tester-card",
+    client_email: "crp-tester-worker@crp-tester-card.iam.gserviceaccount.com",
+    private_key: await serviceAccountPem(walletKeyPair.privateKey),
+  });
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -487,6 +532,164 @@ describe("Admin Dashboard -> Worker /accept — refusals", () => {
       env,
     );
     expect(res.status).toBe(404);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * End-to-end decision flows, through the real Worker handler.
+ * ------------------------------------------------------------------ */
+
+const postAccept = (token, body) =>
+  worker.fetch(
+    new Request(`${WORKER_ORIGIN}/accept`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+
+describe("Admin Dashboard -> Worker /accept — rejection", () => {
+  it("rejects, keeps every request field, and emails the applicant", async () => {
+    const token = await mintAdminToken();
+    const res = await postAccept(token, {
+      requestId: "r1",
+      decision: "rejected",
+      note: "not this round",
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("rejected");
+    expect(body.emailed).toBe(true);
+
+    // The signup fields survive: the updateMask fix must hold end to end.
+    const request = await store.get("requests", "r1");
+    expect(request.name).toBe("Alex Morgan");
+    expect(request.email).toBe("alex@example.com");
+    expect(request.consent).toBe(true);
+    expect(request.source).toBe("early-access-site");
+    expect(request.createdAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(request.status).toBe("rejected");
+    expect(request.reviewedBy).toBe("admin-uid");
+
+    // No tester, and no tester number consumed.
+    expect(await store.list("testers")).toHaveLength(0);
+    expect(await store.get("meta", "testerCounter")).toBeNull();
+  });
+
+  it("sends no Wallet link in the rejection email", async () => {
+    const token = await mintAdminToken();
+    await postAccept(token, { requestId: "r1", decision: "rejected" });
+
+    expect(resendCalls).toHaveLength(1);
+    const mail = resendCalls[0].body;
+    expect(mail.subject).toBe("CRP Testing Program — Application Update");
+    expect(mail.html).not.toContain("pay.google.com");
+  });
+});
+
+describe("Admin Dashboard -> Worker /accept — approval", () => {
+  it("creates the tester, allocates a number, and emails with the Wallet link", async () => {
+    const token = await mintAdminToken();
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("approved");
+    expect(body.testerId).toBe("t_r1");
+    expect(body.testerNumber).toBe(1);
+    expect(body.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
+
+    const tester = await store.get("testers", "t_r1");
+    expect(tester.status).toBe("accepted");
+    expect(tester.active).toBe(true);
+    expect(tester.testerNumber).toBe(1);
+    expect(tester.wallet.classId).toBe("3388000000023210330.crp_tester_loyalty");
+
+    // Request fields preserved, tester linked.
+    const request = await store.get("requests", "r1");
+    expect(request.name).toBe("Alex Morgan");
+    expect(request.email).toBe("alex@example.com");
+    expect(request.createdAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(request.status).toBe("approved");
+    expect(request.testerId).toBe("t_r1");
+  });
+
+  it("signs the Wallet pass with the crp-tester-card key, not the Firebase one", async () => {
+    const adminToken = await mintAdminToken();
+    const res = await postAccept(adminToken, { requestId: "r1", decision: "approved" });
+    const { saveUrl } = await res.json();
+
+    const parts = saveUrl.split("/").pop().split(".");
+    const [header, payload, signature] = parts;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
+
+    expect(claims.iss).toBe("crp-tester-worker@crp-tester-card.iam.gserviceaccount.com");
+    expect(JSON.parse(Buffer.from(header, "base64url").toString()).alg).toBe("RS256");
+
+    // Genuinely signed by the wallet key.
+    const valid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      walletKeyPair.publicKey,
+      Buffer.from(signature, "base64url"),
+      new TextEncoder().encode(`${header}.${payload}`),
+    );
+    expect(valid).toBe(true);
+  });
+
+  it("sends an acceptance email carrying the number and the Wallet link", async () => {
+    const token = await mintAdminToken();
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const { saveUrl } = await res.json();
+
+    expect(resendCalls).toHaveLength(1);
+    const mail = resendCalls[0].body;
+    expect(mail.to).toEqual(["alex@example.com"]);
+    expect(mail.subject).toBe("You're in — CRP Testing Program");
+    expect(mail.html).toContain("TESTER #1");
+    expect(mail.html).toContain(saveUrl);
+    expect(resendCalls[0].headers["Idempotency-Key"]).toBe("application-approved/r1");
+  });
+
+  it("leaks no credential in the response or the email", async () => {
+    const token = await mintAdminToken();
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const responseText = await res.text();
+    const mail = JSON.stringify(resendCalls[0].body);
+
+    for (const secret of ["PRIVATE KEY", "re_test", "BEGIN RSA"]) {
+      expect(responseText, secret).not.toContain(secret);
+      expect(mail, secret).not.toContain(secret);
+    }
+  });
+
+  it("refuses a retried approval without a second tester, number or email", async () => {
+    const token = await mintAdminToken();
+
+    const first = await postAccept(token, { requestId: "r1", decision: "approved" });
+    expect(first.status).toBe(200);
+    expect(resendCalls).toHaveLength(1);
+
+    const second = await postAccept(token, { requestId: "r1", decision: "approved" });
+    expect(second.status).toBe(409);
+
+    expect(await store.list("testers")).toHaveLength(1);
+    expect((await store.get("meta", "testerCounter")).lastNumber).toBe(1);
+    expect(resendCalls).toHaveLength(1);
+  });
+
+  it("does not burn a number when a rejected request is later approved", async () => {
+    const token = await mintAdminToken();
+    await postAccept(token, { requestId: "r1", decision: "rejected" });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+
+    expect(res.status).toBe(409);
+    expect(await store.get("meta", "testerCounter")).toBeNull();
   });
 });
 

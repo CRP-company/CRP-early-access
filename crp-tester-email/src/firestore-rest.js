@@ -160,6 +160,18 @@ export function createFirestore(secretJson, projectId) {
       url.searchParams.set("currentDocument.exists", "true");
     }
 
+    // An explicit updateMask is required. Without one, the REST API treats the
+    // PATCH body as the *entire* document and DELETES every field it does not
+    // mention. That silently destroyed data: deciding a request sent only
+    // {status, note, reviewedBy, reviewedAt, updatedAt}, which wiped the
+    // applicant's name, email, consent and createdAt. The doc then vanished
+    // from the Admin Dashboard, because Firestore excludes documents that lack
+    // the orderBy field, while the requestEmails dedupe marker survived and
+    // kept reporting "you have already applied".
+    for (const field of Object.keys(data)) {
+      url.searchParams.append("updateMask.fieldPaths", field);
+    }
+
     const res = await fetch(url, {
       method: "PATCH",
       headers: await authHeaders(),
