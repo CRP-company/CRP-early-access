@@ -11,7 +11,7 @@
  *   - duplicate protection is unaffected: the requestEmails marker is untouched
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { decideRequest } from "../src/accept.js";
+import { decideRequest, setTesterStatus } from "../src/accept.js";
 import { META_COLLECTION, COUNTER_DOC } from "../src/tester-lifecycle.js";
 import { buildAcceptanceEmail, buildRejectionEmail } from "../src/decision-emails.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID, CLASS_ID } from "../src/wallet.js";
@@ -482,6 +482,71 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
   });
 });
 
+describe("deactivation requires a reason (setTesterActive parity)", () => {
+  // The dashboard toggle used to call the setTesterActive callable, which refused
+  // to deactivate without a reason. Now that the toggle goes through the Worker's
+  // /tester-status route, the same rule has to hold there, or a tester could be
+  // revoked with no record of why.
+  it("refuses to deactivate without a reason", async () => {
+    const store = memoryStore({
+      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+    });
+
+    await expect(
+      setTesterStatus(store, { testerId: "t1", active: false, reason: null, ...actor }),
+    ).rejects.toThrow(/reason is required when deactivating/i);
+  });
+
+  it("refuses an empty or whitespace-only reason", async () => {
+    const store = memoryStore({
+      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+    });
+
+    await expect(
+      setTesterStatus(store, { testerId: "t1", active: false, reason: "   ", ...actor }),
+    ).rejects.toThrow(/reason is required when deactivating/i);
+  });
+
+  it("deactivates with a reason and keeps status in step with active", async () => {
+    const store = memoryStore({
+      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+    });
+
+    const result = await setTesterStatus(store, {
+      testerId: "t1",
+      active: false,
+      reason: "asked to leave",
+      ...actor,
+    });
+
+    expect(result.status).toBe("revoked");
+    expect(result.active).toBe(false);
+    const doc = store.docs.get("testers/t1");
+    expect(doc.deactivationReason).toBe("asked to leave");
+    expect(doc.deactivatedBy).toBe("admin-1");
+    // The tester number must survive a revoke.
+    expect(doc.testerNumber).toBe(1);
+  });
+
+  it("reactivates without needing a reason and burns no number", async () => {
+    const store = memoryStore({
+      "testers/t1": {
+        email: "a@b.com",
+        status: "revoked",
+        testerNumber: 1,
+        acceptedAt: "2026-09-01T00:00:00.000Z",
+      },
+    });
+
+    const result = await setTesterStatus(store, { testerId: "t1", active: true, ...actor });
+
+    expect(result.status).toBe("accepted");
+    expect(result.active).toBe(true);
+    // Reactivating must not allocate a new number.
+    expect(counterValue(store)).toBeUndefined();
+  });
+});
+
 describe("acceptance email content", () => {
   const SAVE_URL = "https://pay.google.com/gp/v/save/abc.def.ghi";
   const build = (over = {}) =>
@@ -615,19 +680,45 @@ describe("wallet module", () => {
 });
 
 describe("admin dashboard source no longer calls the removed Cloud Function", () => {
-  // `issueWalletPass` cannot be deployed on the Spark plan, so the dashboard
-  // used to call a URL that does not exist and failed on CORS. Guard against it
-  // being reintroduced.
-  it("never calls the issueWalletPass callable", () => {
-    expect(adminSource).not.toMatch(/call\(\s*["']issueWalletPass["']/);
-    expect(adminSource).not.toMatch(/httpsCallable[^;]*issueWalletPass/);
+  // Every callable left in `functions/` is undeployed on the Spark plan. Calling
+  // one from GitHub Pages fails on CORS, so none of these names may appear as a
+  // call in the admin client. Guards against any of them being reintroduced.
+  const OBSOLETE_CALLABLES = [
+    "issueWalletPass",
+    "setTesterActive",
+    "setTesterStatus",
+    "decideRequest",
+    "recordActivity",
+    "peekNextTesterNumber",
+    "getMyWalletPass",
+  ];
+
+  it("never calls an undeployed Cloud Function", () => {
+    for (const name of OBSOLETE_CALLABLES) {
+      expect(
+        adminSource,
+        `admin.js must not call the ${name} callable`,
+      ).not.toMatch(new RegExp(`call\\(\\s*["']${name}["']`));
+    }
   });
 
-  it("reaches Wallet issuance through the Worker /tester-wallet route", () => {
+  it("has no httpsCallable/getFunctions machinery at all", () => {
+    // The strongest guarantee: with the SDK import gone, no callable can be
+    // called at all, whatever someone adds later.
+    expect(adminSource).not.toContain("httpsCallable");
+    expect(adminSource).not.toContain("getFunctions");
+    expect(adminSource).not.toContain("firebase-functions.js");
+  });
+
+  it("routes Wallet issuance through the Worker /tester-wallet", () => {
     expect(adminSource).toContain("/tester-wallet");
     // The ID token must still be sent, so the Worker can re-check the claim.
     expect(adminSource).toContain("postToWorker");
     expect(adminSource).toContain("getIdToken");
+  });
+
+  it("routes the active/revoked toggle through the Worker /tester-status", () => {
+    expect(adminSource).toContain("/tester-status");
   });
 
   it("still uses the Worker for approve/reject", () => {
@@ -635,8 +726,15 @@ describe("admin dashboard source no longer calls the removed Cloud Function", ()
   });
 
   it("keeps the admin claim enforcement in the Worker", () => {
-    // The wallet route must sit behind requireAdmin like every other admin route.
+    // Every admin route must sit behind requireAdmin.
     expect(indexSource).toMatch(/requireAdmin\(request, projectId\)/);
     expect(indexSource).toContain("/tester-wallet");
+    expect(indexSource).toContain("/tester-status");
+  });
+
+  it("never exposes a service-account credential in the admin client", () => {
+    expect(adminSource).not.toMatch(/PRIVATE KEY/);
+    expect(adminSource).not.toMatch(/service_account/);
+    expect(adminSource).not.toMatch(/FIREBASE_SERVICE_ACCOUNT_JSON|GOOGLE_WALLET_SERVICE_ACCOUNT_JSON/);
   });
 });

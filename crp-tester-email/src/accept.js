@@ -347,6 +347,14 @@ export async function setTesterStatus(store, { testerId, status, active, reason,
   if (target === STATUS.REJECTED && !reason) {
     throw new AcceptError(400, "A reason is required when rejecting.");
   }
+  // Deactivating must be explainable, exactly as the setTesterActive callable
+  // required. Without this the dashboard could revoke a tester with no record of
+  // why, which is the one thing the audit trail is for. Trimmed first, so a
+  // whitespace-only reason is rejected rather than stored as "   ".
+  const cleanReason = typeof reason === "string" ? reason.trim() : reason;
+  if (active === false && !cleanReason) {
+    throw new AcceptError(400, "A reason is required when deactivating a tester.");
+  }
 
   const tester = await store.getDocument(TESTERS, testerId);
   if (!tester) throw new AcceptError(404, "No such tester.");
@@ -375,7 +383,7 @@ export async function setTesterStatus(store, { testerId, status, active, reason,
   } else {
     patch.deactivatedAt = now;
     patch.deactivatedBy = actorUid || "system";
-    patch.deactivationReason = reason ? String(reason).slice(0, 300) : null;
+    patch.deactivationReason = cleanReason ? String(cleanReason).slice(0, 300) : null;
   }
 
   await store.updateDocument(TESTERS, testerId, patch);

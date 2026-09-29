@@ -28,10 +28,6 @@ import {
   limit,
   onSnapshot,
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import {
-  getFunctions,
-  httpsCallable,
-} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
 
 import { firebaseConfig } from "./firebase-config.js";
 import { decideViaWorker, postToWorker } from "./worker-client.js";
@@ -56,7 +52,6 @@ const els = {
 
 let auth = null;
 let db = null;
-let functions = null;
 
 /* ------------------------------------------------------------------ *
  * Helpers
@@ -223,16 +218,15 @@ els.testerFilter.addEventListener("change", () => {
 /* ------------------------------------------------------------------ *
  * Actions
  *
- * Approve / Reject go to the Cloudflare Worker, which is the only writable
- * path on the Spark plan (Cloud Functions cannot be deployed there). The
- * Worker verifies this same `admin` claim from the ID token, so the security
+ * Every mutating action goes to the Cloudflare Worker, which is the only
+ * writable path on the Spark plan (Cloud Functions cannot be deployed there).
+ * The Worker verifies this same `admin` claim from the ID token, so the security
  * model is unchanged: the client still never writes to Firestore directly.
  *
- * The remaining actions still use callables, which are deployed when the
- * project moves to Blaze.
+ * No callable client is imported here at all. Every function that remains in
+ * `functions/` is undeployed on Spark, and calling one fails on CORS from
+ * GitHub Pages.
  * ------------------------------------------------------------------ */
-
-const call = (name, data) => httpsCallable(functions, name)(data);
 
 /** Worker base URL, or null when not configured. */
 const WORKER_URL =
@@ -303,7 +297,18 @@ async function toggleTester(testerId, active, button) {
 
   setBusy(button, true);
   try {
-    await call("setTesterActive", { testerId, active, reason });
+    // Goes to the Worker, not the `setTesterActive` callable. Cloud Functions
+    // cannot be deployed on the Spark plan, so the old call hit a URL that does
+    // not exist and failed on CORS. The Worker's /tester-status route performs
+    // the same lifecycle transition — status stays in step with the `active`
+    // flag, deactivation still requires a reason, and an audit entry is written —
+    // behind the same `admin` claim check.
+    const token = await auth.currentUser.getIdToken(true);
+    await postToWorker({
+      url: `${WORKER_URL}/tester-status`,
+      token,
+      body: { testerId, active, reason },
+    });
     toast(active ? "Tester reactivated." : "Tester deactivated.");
   } catch (error) {
     toast(error.message || "Could not update the tester.", "error");
@@ -424,7 +429,6 @@ if (!isConfigured()) {
   const app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
-  functions = getFunctions(app);
 
   onAuthStateChanged(auth, async (user) => {
     if (!user) return showLogin();
