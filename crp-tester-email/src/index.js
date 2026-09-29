@@ -25,6 +25,10 @@ import { sendEmail } from "./resend.js";
 import { createFirestore } from "./firestore-rest.js";
 import { requireAdmin, AuthError } from "./auth.js";
 import { decideRequest, setTesterStatus } from "./accept.js";
+import { buildSaveUrl, accountIdFor, ISSUER_ID } from "./wallet.js";
+import { activeForStatus } from "./tester-lifecycle.js";
+
+const TESTERS = "testers";
 
 // Only the live site may call this. Configurable so a staging deploy can point
 // elsewhere, but the default is the production origin.
@@ -145,6 +149,50 @@ async function handleAdmin(request, env, body, route, origin) {
     return json(200, { ok: true, ...result }, origin);
   }
 
+  // /tester-wallet: reissue a tester's card on demand.
+  //
+  // This replaces the `issueWalletPass` Cloud Function. On the Spark plan that
+  // Function cannot be deployed at all, so the dashboard used to call a URL that
+  // did not exist and failed on CORS. It reuses the same buildSaveUrl() the
+  // approval email uses, and it stays behind the same requireAdmin() check, so
+  // there is still exactly one Wallet implementation and no client can reach it
+  // without the admin claim.
+  if (route === "/tester-wallet") {
+    const { testerId } = body || {};
+    if (!testerId || typeof testerId !== "string") {
+      return json(400, { ok: false, error: "testerId is required." }, origin);
+    }
+
+    const tester = await store.getDocument(TESTERS, testerId);
+    if (!tester) return json(404, { ok: false, error: "No such tester." }, origin);
+
+    // The object id is derived from the tester document id, so this updates the
+    // card the applicant already holds rather than minting a second object.
+    const saveUrl = await buildSaveUrl({
+      tester: { id: testerId, name: tester.name },
+      // Pass state follows `active`, so a revoked tester gets a REVOKED card.
+      active: activeForStatus(tester.status),
+      testerNumber:
+        typeof tester.testerNumber === "number" ? tester.testerNumber : null,
+      secretJson: env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON,
+    });
+
+    await store.updateDocument(TESTERS, testerId, {
+      wallet: {
+        issuerId: ISSUER_ID,
+        classId: `${ISSUER_ID}.crp_tester_loyalty`,
+        accountId: accountIdFor(testerId),
+        lastIssuedAt: new Date(),
+      },
+    });
+
+    return json(
+      200,
+      { ok: true, saveUrl, active: activeForStatus(tester.status) },
+      origin,
+    );
+  }
+
   // /tester-status
   const { testerId, status, active, reason } = body || {};
   if (!testerId || typeof testerId !== "string") {
@@ -175,7 +223,14 @@ export default {
       });
     }
 
-    const isAdminRoute = url.pathname === "/accept" || url.pathname === "/tester-status";
+    const isAdminRoute =
+      url.pathname === "/accept" ||
+      url.pathname === "/tester-status" ||
+      // Staff reissue of a tester's card. This replaces the `issueWalletPass`
+      // Cloud Function, which cannot be deployed on the Spark plan; it reuses
+      // the same Wallet module the approval email uses, so there is still only
+      // one Wallet implementation.
+      url.pathname === "/tester-wallet";
 
     if (url.pathname !== "/send" && !isAdminRoute) {
       return json(404, { ok: false, error: "Not found." });

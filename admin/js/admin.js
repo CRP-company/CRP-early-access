@@ -34,7 +34,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
 
 import { firebaseConfig } from "./firebase-config.js";
-import { decideViaWorker } from "./worker-client.js";
+import { decideViaWorker, postToWorker } from "./worker-client.js";
 
 const els = {
   login: document.getElementById("login-view"),
@@ -263,10 +263,24 @@ async function decideRequest(requestId, decision, button) {
     // The roster list is a live onSnapshot subscription, so the new tester
     // appears on its own. Surface the number when we have one, since that is
     // the bit an admin actually wants to confirm.
-    if (decision === "approved" && result.testerNumber) {
-      toast(`Approved — tester #${result.testerNumber} created.`);
+    //
+    // The decision email is best-effort server-side, so the Worker reports
+    // whether it was sent. Reporting that explicitly matters: an admin who sees
+    // only "Approved" would assume the applicant was told, when the mail may
+    // never have left the building.
+    const label =
+      decision === "approved"
+        ? result.testerNumber
+          ? `Approved — tester #${result.testerNumber} created.`
+          : "Approved — tester created."
+        : "Request rejected.";
+
+    if (result.emailed === false) {
+      toast(`${label} But the email was NOT sent — check Resend.`, "error");
+    } else if (decision === "approved" && !result.saveUrl) {
+      toast(`${label} Email sent, but the Wallet link is missing — reissue the card.`, "warn");
     } else {
-      toast(decision === "approved" ? "Approved — tester created." : "Request rejected.");
+      toast(label);
     }
   } catch (error) {
     toast(error.message || "Could not save that decision.", "error");
@@ -301,9 +315,23 @@ async function toggleTester(testerId, active, button) {
 async function issueWallet(testerId, button) {
   setBusy(button, true);
   try {
-    const { data } = await call("issueWalletPass", { testerId });
-    window.open(data.saveUrl, "_blank", "noopener");
-    toast(data.active ? "Wallet pass opened." : "Pass opened — card is revoked.", data.active ? "ok" : "warn");
+    // Goes to the Worker, not the `issueWalletPass` callable. That Cloud Function
+    // cannot be deployed on the Spark plan, so the old call hit a URL that does
+    // not exist and failed on CORS. The Worker verifies the same `admin` claim
+    // from the ID token, and signs the pass with the same Wallet module the
+    // approval email uses.
+    const token = await auth.currentUser.getIdToken(true);
+    const result = await postToWorker({
+      url: `${WORKER_URL}/tester-wallet`,
+      token,
+      body: { testerId },
+    });
+
+    window.open(result.saveUrl, "_blank", "noopener");
+    toast(
+      result.active ? "Wallet pass opened." : "Pass opened — card is revoked.",
+      result.active ? "ok" : "warn",
+    );
   } catch (error) {
     toast(error.message || "Could not issue a pass.", "error");
   } finally {

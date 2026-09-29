@@ -16,6 +16,13 @@ import { META_COLLECTION, COUNTER_DOC } from "../src/tester-lifecycle.js";
 import { buildAcceptanceEmail, buildRejectionEmail } from "../src/decision-emails.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID, CLASS_ID } from "../src/wallet.js";
 
+// Vite inlines these as strings at build time. The Workers test runtime has no
+// filesystem, so readFileSync is not available here.
+// eslint-disable-next-line import/extensions
+import adminSource from "../../admin/js/admin.js?raw";
+// eslint-disable-next-line import/extensions
+import indexSource from "../src/index.js?raw";
+
 /** Minimal in-memory store with the preconditions decideRequest relies on. */
 function memoryStore(seed = {}) {
   const docs = new Map();
@@ -604,5 +611,32 @@ describe("wallet module", () => {
     });
     expect(url).not.toContain("PRIVATE KEY");
     expect(url).not.toContain(JSON.parse(walletSecret).private_key.slice(40, 80));
+  });
+});
+
+describe("admin dashboard source no longer calls the removed Cloud Function", () => {
+  // `issueWalletPass` cannot be deployed on the Spark plan, so the dashboard
+  // used to call a URL that does not exist and failed on CORS. Guard against it
+  // being reintroduced.
+  it("never calls the issueWalletPass callable", () => {
+    expect(adminSource).not.toMatch(/call\(\s*["']issueWalletPass["']/);
+    expect(adminSource).not.toMatch(/httpsCallable[^;]*issueWalletPass/);
+  });
+
+  it("reaches Wallet issuance through the Worker /tester-wallet route", () => {
+    expect(adminSource).toContain("/tester-wallet");
+    // The ID token must still be sent, so the Worker can re-check the claim.
+    expect(adminSource).toContain("postToWorker");
+    expect(adminSource).toContain("getIdToken");
+  });
+
+  it("still uses the Worker for approve/reject", () => {
+    expect(adminSource).toContain("/accept");
+  });
+
+  it("keeps the admin claim enforcement in the Worker", () => {
+    // The wallet route must sit behind requireAdmin like every other admin route.
+    expect(indexSource).toMatch(/requireAdmin\(request, projectId\)/);
+    expect(indexSource).toContain("/tester-wallet");
   });
 });

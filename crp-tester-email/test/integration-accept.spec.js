@@ -693,5 +693,150 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
   });
 });
 
+describe("Admin Dashboard -> Worker /tester-wallet", () => {
+  const postWallet = (token, body) =>
+    worker.fetch(
+      new Request(`${WORKER_ORIGIN}/tester-wallet`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+
+  const seedTester = (over = {}) =>
+    store.docs.set("testers/t_r1", {
+      requestId: "r1",
+      name: "Alex Morgan",
+      email: "alex@example.com",
+      status: "accepted",
+      active: true,
+      testerNumber: 1,
+      ...over,
+    });
+
+  it("replaces the undeployed issueWalletPass Cloud Function", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    const res = await postWallet(token, { testerId: "t_r1" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
+    expect(body.active).toBe(true);
+  });
+
+  it("signs with the Wallet key and the existing tester number", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    const res = await postWallet(token, { testerId: "t_r1" });
+    const { saveUrl } = await res.json();
+
+    const [header, payload, signature] = saveUrl.split("/").pop().split(".");
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
+    expect(claims.iss).toBe("crp-tester-worker@crp-tester-card.iam.gserviceaccount.com");
+    expect(claims.payload.loyaltyObjects[0].accountName).toBe("CRP Tester #1");
+
+    const valid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      walletKeyPair.publicKey,
+      Buffer.from(signature, "base64url"),
+      new TextEncoder().encode(`${header}.${payload}`),
+    );
+    expect(valid).toBe(true);
+  });
+
+  it("issues the SAME Wallet object, so no second pass is created", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    const first = await (await postWallet(token, { testerId: "t_r1" })).json();
+    const second = await (await postWallet(token, { testerId: "t_r1" })).json();
+
+    const objectId = (u) =>
+      JSON.parse(Buffer.from(u.split("/").pop().split(".")[1], "base64url").toString())
+        .payload.loyaltyObjects[0].id;
+
+    // Derived from the tester document id, so a reissue updates one object.
+    expect(objectId(first.saveUrl)).toBe(objectId(second.saveUrl));
+    expect(objectId(first.saveUrl)).toBe("3388000000023210330.crp_tester_loyalty_t_r1");
+    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toEqual(["testers/t_r1"]);
+  });
+
+  it("issues a REVOKED card for an inactive tester", async () => {
+    seedTester({ status: "revoked", active: false });
+    const token = await mintAdminToken();
+    const res = await postWallet(token, { testerId: "t_r1" });
+    const { saveUrl, active } = await res.json();
+
+    expect(active).toBe(false);
+    const claims = JSON.parse(Buffer.from(saveUrl.split("/").pop().split(".")[1], "base64url").toString());
+    expect(claims.payload.loyaltyObjects[0].state).toBe("REVOKED");
+  });
+
+  it("requires the admin claim", async () => {
+    seedTester();
+    // A valid token that is not staff.
+    const nonAdmin = await mintAdminToken({ admin: false });
+    const res = await postWallet(nonAdmin, { testerId: "t_r1" });
+    expect(res.status).toBe(403);
+
+    const anon = await worker.fetch(
+      new Request(`${WORKER_ORIGIN}/tester-wallet`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: ORIGIN },
+        body: JSON.stringify({ testerId: "t_r1" }),
+      }),
+      env,
+    );
+    expect(anon.status).toBe(401);
+  });
+
+  it("rejects an unknown origin and an unknown tester", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+
+    const wrongOrigin = await worker.fetch(
+      new Request(`${WORKER_ORIGIN}/tester-wallet`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://evil.example",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ testerId: "t_r1" }),
+      }),
+      env,
+    );
+    expect(wrongOrigin.status).toBe(403);
+
+    const missing = await postWallet(token, { testerId: "does-not-exist" });
+    expect(missing.status).toBe(404);
+  });
+
+  it("exposes no credential in the response", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    const res = await postWallet(token, { testerId: "t_r1" });
+    const text = await res.text();
+
+    expect(text).not.toContain("PRIVATE KEY");
+    expect(text).not.toContain("re_test");
+    expect(text).not.toContain(env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON.slice(0, 60));
+  });
+
+  it("does not send an email when a pass is reissued", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    await postWallet(token, { testerId: "t_r1" });
+    // Reissuing a card is not an acceptance event.
+    expect(resendCalls).toHaveLength(0);
+  });
+});
+
+
 
 
