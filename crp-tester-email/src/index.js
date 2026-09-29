@@ -93,7 +93,9 @@ async function handleAdmin(request, env, body, route) {
     throw error;
   }
 
-  const store = createFirestore(sa);
+  // Pinned to the same project the caller's token was verified against, so
+  // authorisation and data can never drift onto different projects.
+  const store = createFirestore(sa, projectId);
 
   if (route === "/accept") {
     const { requestId, decision, note } = body || {};

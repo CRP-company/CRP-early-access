@@ -70,10 +70,30 @@ export function decodeFields(fields) {
 
 /**
  * A Firestore handle bound to a service-account secret.
+ *
  * @param {string} secretJson  Raw service account JSON (from a Worker secret).
+ * @param {string} projectId   The project to operate on, from
+ *   FIREBASE_PROJECT_ID. Required, and cross-checked against the key.
  */
-export function createFirestore(secretJson) {
-  const projectId = JSON.parse(secretJson).project_id;
+export function createFirestore(secretJson, projectId) {
+  const keyProject = JSON.parse(secretJson).project_id;
+
+  // The caller's token is verified against FIREBASE_PROJECT_ID, so the data
+  // must be written to that same project. Deriving the target from the key
+  // instead would let a mismatched key write into a *different* project's
+  // database while the authorisation check passed against this one — a silent
+  // cross-project write. Fail loudly rather than guess.
+  if (!projectId) {
+    throw new Error("FIREBASE_PROJECT_ID is not configured.");
+  }
+  if (keyProject !== projectId) {
+    throw new Error(
+      `Service account is for project "${keyProject}" but FIREBASE_PROJECT_ID is ` +
+        `"${projectId}". Refusing to write to the wrong project. Use a key for ` +
+        `${projectId}, or correct FIREBASE_PROJECT_ID.`,
+    );
+  }
+
   const base = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
 
   const docName = (collection, id) => `${base}/${collection}/${id}`;

@@ -2,6 +2,11 @@
 crp-tester-card-*.json
 *-firebase-adminsdk-*.json
 serviceAccount*.json
+# The Worker key normally lives outside the repo (~/), but ignore it here too
+# in case it is ever copied in — a committed key cannot be un-leaked.
+crp-worker-key*.json
+*-worker-key*.json
+private_key*.json
 
 # NOTE: js/firebase-config.js and admin/js/firebase-config.js are intentionally
 # COMMITTED. They are Firebase *web* configs, which are public identifiers by
