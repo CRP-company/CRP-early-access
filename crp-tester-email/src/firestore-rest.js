@@ -98,6 +98,18 @@ export function createFirestore(secretJson, projectId) {
 
   const docName = (collection, id) => `${base}/${collection}/${id}`;
 
+  /**
+   * The relative resource name, e.g.
+   * `projects/p/databases/(default)/documents/testers/t1`.
+   *
+   * Distinct from docName(), which is a full URL. The `name` inside a Firestore
+   * `Write` must be relative, not an absolute URL — passing the full URL is
+   * rejected with `Document name "https://..." lacks "projects" at index 0`.
+   * (Verified live against production.)
+   */
+  const docPath = (collection, id) =>
+    `projects/${projectId}/databases/(default)/documents/${collection}/${id}`;
+
   async function authHeaders() {
     return {
       Authorization: `Bearer ${await getAccessToken(secretJson)}`,
@@ -260,6 +272,85 @@ export function createFirestore(secretJson, projectId) {
     return out;
   }
 
+  /**
+   * Atomically archive a tester and release their dedupe marker.
+   *
+   * These two writes MUST land together. A partial remove is the one genuinely
+   * dangerous outcome here: either the tester is gone from the active roster
+   * while their `requestEmails` marker survives forever (they are blocked from
+   * ever applying again, with no way to fix it from the UI), or the marker is
+   * released while the tester is still listed as active (a removed person is
+   * still on the roster).
+   *
+   * A Firestore transaction gives real cross-document atomicity, so this uses
+   * beginTransaction/commit rather than sequential writes. The existing
+   * `commit()` already forwards REST `writes` verbatim, so a `delete` write is
+   * just `{ delete: <docName> }`.
+   *
+   * `delete` without a precondition is a no-op when the marker is already
+   * absent, which is what makes a retried removal harmless.
+   *
+   * @param {object} args
+   * @param {string} args.collection          Tester collection.
+   * @param {string} args.id                  Tester document id.
+   * @param {object} args.patch               Fields to merge into the tester.
+   * @param {string} args.updateTime          Version precondition for the tester.
+   * @param {string} args.auditCollection
+   * @param {string} args.auditId             Deterministic, so a retry cannot
+   *                                           write a second history entry.
+   * @param {object} args.auditEntry
+   * @param {string|null} args.releaseCollection  Marker collection, or null to
+   *                                           leave the marker alone.
+   * @param {string|null} args.releaseId
+   * @returns {Promise<{removed: boolean}>}
+   */
+  async function removeTester({
+    collection,
+    id,
+    patch,
+    updateTime,
+    auditCollection,
+    auditId,
+    auditEntry,
+    releaseCollection = null,
+    releaseId = null,
+  }) {
+    const transaction = await beginTransaction();
+
+    const writes = [
+      {
+        update: {
+          name: docPath(collection, id),
+          fields: encodeFields(patch),
+        },
+        // Only these fields change; name, email, testerNumber and the activity
+        // history are deliberately left intact.
+        updateMask: { fieldPaths: Object.keys(patch) },
+        currentDocument: { updateTime },
+      },
+      {
+        // Firestore's Write has no `create` verb — only `update` and `delete`.
+        // Create-if-absent is expressed as an update guarded by
+        // `exists: false`, which fails if the id is already taken. That is what
+        // makes a repeated removal impossible: it cannot append a second
+        // history entry. (Verified live: a `create` write is rejected outright
+        // with `Unknown name "create" at 'writes[1]'`.)
+        update: {
+          name: docPath(auditCollection, auditId),
+          fields: encodeFields(auditEntry),
+        },
+        currentDocument: { exists: false },
+      },
+    ];
+
+    if (releaseCollection && releaseId) {
+      writes.push({ delete: docPath(releaseCollection, releaseId) });
+    }
+
+    await commit(transaction, writes);
+    return { removed: true };
+  }
+
   return {
     getDocument,
     createDocument,
@@ -268,6 +359,7 @@ export function createFirestore(secretJson, projectId) {
     beginTransaction,
     commit,
     rollback,
+    removeTester,
     docName,
   };
 }

@@ -19,7 +19,26 @@ import { sendEmail } from "./resend.js";
 
 const REQUESTS = "requests";
 const TESTERS = "testers";
+const REQUEST_EMAILS = "requestEmails";
+const AUDIT = "audit";
 const ISSUER_ID = "3388000000023210330";
+
+/**
+ * The document key for an address in `requestEmails`.
+ *
+ * Must match js/signup.js hashEmail() exactly — the same lowercased, trimmed
+ * SHA-256 hex — or the marker being deleted will not be the one the signup form
+ * reads, and the person stays blocked with no visible cause.
+ */
+function hashEmail(email) {
+  const bytes = new TextEncoder().encode(String(email).trim().toLowerCase());
+  const digest = crypto.subtle.digest("SHA-256", bytes);
+  return digest.then((buf) =>
+    Array.from(new Uint8Array(buf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(""),
+  );
+}
 
 const DEFAULT_FROM = "CRP Tester Program <testing@crp.company>";
 
@@ -85,10 +104,17 @@ async function writeAudit(store, entry) {
   }
 }
 
-/** Find an existing tester with the same email, ignoring one id. */
+/**
+ * Find an existing tester with the same email, ignoring one id.
+ *
+ * Removed testers are skipped. Someone who left the program and applied again
+ * must get a genuinely new tester with a new number, not be linked back to
+ * their archived record — which would resurrect the old number and make the
+ * removal reversible by accident.
+ */
 async function findExistingTester(store, email, excludeId) {
   const list = await store.listCollection(TESTERS);
-  const match = list.find((t) => t.email === email && t.id !== excludeId);
+  const match = list.find((t) => t.email === email && t.id !== excludeId && !t.removed);
   return match ? match.id : null;
 }
 
@@ -330,6 +356,154 @@ async function issueWalletPass({ store, env, testerId, testerNumber, request }) 
     );
     return null;
   }
+}
+
+/**
+ * Remove a tester from the Testing Program.
+ *
+ * This is deliberately NOT the same thing as deactivating, and does not touch
+ * setTesterStatus(). Deactivate keeps someone in the program as `revoked`,
+ * reversible, and still blocks them from re-applying. Remove is the exit
+ * decision: the person leaves, and is allowed to apply again.
+ *
+ * What it does, in one Firestore transaction (see store.removeTester):
+ *   1. archives the tester — `removed` flag, reason, who and when
+ *   2. writes a permanent audit entry with testerId, number, email and actor
+ *   3. deletes their requestEmails marker, releasing the duplicate protection
+ *
+ * What it deliberately preserves:
+ *   - the tester document, so name, number, activity history and past audit
+ *     entries survive. The document is archived, not deleted.
+ *   - the sequential counter, so the number is never handed to anyone else.
+ *     A re-approved person gets a brand new number.
+ *
+ * The archived tester is hidden from the active roster by the dashboard's
+ * filter, and findExistingTester() skips removed testers, so a later
+ * application from the same address creates a genuinely new tester rather than
+ * being linked back to this one.
+ *
+ * @param {object} store Firestore handle.
+ * @param {object} args
+ * @param {string} args.testerId
+ * @param {string} [args.reason]  Required: removal must be explainable.
+ * @param {string} [args.actorUid] Admin uid, for the audit entry.
+ * @param {string} [args.actorEmail]
+ */
+export async function removeTester(store, { testerId, reason, actorUid, actorEmail }) {
+  if (!testerId || typeof testerId !== "string") {
+    throw new AcceptError(400, "testerId is required.");
+  }
+
+  const cleanReason = typeof reason === "string" ? reason.trim() : "";
+  if (!cleanReason) {
+    // Same rule as deactivation, and for the same reason: the audit trail is
+    // only useful if it says why.
+    throw new AcceptError(400, "A reason is required when removing a tester.");
+  }
+
+  const tester = await store.getDocument(TESTERS, testerId);
+  if (!tester) throw new AcceptError(404, "No such tester.");
+
+  // Idempotency: a repeat removal is a no-op, not a second archive and not a
+  // second audit entry. This is the guard that makes the operation safe to retry
+  // after a timeout or a double-click.
+  if (tester.removed) {
+    return {
+      testerId,
+      removed: true,
+      alreadyRemoved: true,
+      testerNumber: tester.testerNumber ?? null,
+      releasedMarker: false,
+    };
+  }
+
+  const now = new Date();
+  const email = tester.email;
+
+  // The marker key is the same hash js/signup.js writes. Without a marker there
+  // is nothing to release — a tester created before markers existed, say — and
+  // the removal still proceeds.
+  const releaseId = email ? await hashEmail(email) : null;
+
+  const auditEntry = {
+    action: "tester.removed",
+    actor: actorUid || "system",
+    actorEmail: actorEmail || null,
+    testerId,
+    testerNumber: tester.testerNumber ?? null,
+    email: email || null,
+    reason: String(cleanReason).slice(0, 300),
+    at: now,
+    // Recorded so a future reader can see the Wallet card was revoked as part of
+    // the same decision, not left live.
+    walletRevoked: true,
+  };
+
+  // Archived, not deleted: the roster, number and history all stay on the
+  // record; only the participation ends.
+  const patch = {
+    removed: true,
+    removedAt: now,
+    removedBy: actorUid || "system",
+    removalReason: String(cleanReason).slice(0, 300),
+    // Leaving the program implies not active. `status` moves to revoked so the
+    // lifecycle vocabulary stays consistent and a reissue yields a REVOKED card.
+    status: STATUS.REVOKED,
+    active: false,
+    statusChangedAt: now,
+    statusChangedBy: actorUid || "system",
+    deactivatedAt: now,
+    deactivatedBy: actorUid || "system",
+    deactivationReason: String(cleanReason).slice(0, 300),
+    updatedAt: now,
+  };
+
+  try {
+    await store.removeTester({
+      collection: TESTERS,
+      id: testerId,
+      patch,
+      // Version precondition: if anyone edited this tester between our read and
+      // the commit, the removal fails rather than clobbering their change.
+      updateTime: tester.updateTime,
+      auditCollection: AUDIT,
+      // Deterministic, so the create-if-absent write below fails on a retry
+      // instead of appending a second removal entry.
+      auditId: `removed_${testerId}`,
+      auditEntry,
+      releaseCollection: releaseId ? REQUEST_EMAILS : null,
+      releaseId,
+    });
+  } catch (error) {
+    if (error && (error.status === 409 || error.status === 412)) {
+      // Someone changed the tester concurrently. Re-read so the retry reports
+      // accurately rather than blindly clobbering.
+      const current = await store.getDocument(TESTERS, testerId);
+      if (current && current.removed) {
+        return {
+          testerId,
+          removed: true,
+          alreadyRemoved: true,
+          testerNumber: current.testerNumber ?? null,
+          releasedMarker: false,
+        };
+      }
+      throw new AcceptError(409, "This tester changed while removing. Try again.");
+    }
+    throw error;
+  }
+
+  return {
+    testerId,
+    removed: true,
+    alreadyRemoved: false,
+    testerNumber: tester.testerNumber ?? null,
+    email: email || null,
+    // The caller reissues the card so the applicant's wallet shows REVOKED.
+    // Deliberately not generated here: the transactional commit is the
+    // authoritative record, and a Wallet failure must not undo a removal.
+    releasedMarker: Boolean(releaseId),
+  };
 }
 
 /**

@@ -128,19 +128,23 @@ function renderRequests(snapshot) {
 
 function renderTesters(snapshot) {
   els.testersBody.innerHTML = "";
-  els.testersCount.textContent = snapshot.size;
 
-  let activeCount = 0;
-  for (const doc of snapshot.docs) if (doc.data().active) activeCount += 1;
-  els.activeCount.textContent = activeCount;
+  // Removed testers are archived, not deleted, so they are still in the
+  // collection. Filter them out here so the roster — and its counts — show the
+  // people actually in the program, while the record and its audit history
+  // survive untouched.
+  const visible = snapshot.docs.filter((doc) => !doc.data().removed);
 
-  if (snapshot.empty) {
+  els.testersCount.textContent = visible.length;
+  els.activeCount.textContent = visible.filter((doc) => doc.data().active).length;
+
+  if (visible.length === 0) {
     els.testersBody.innerHTML =
       `<tr><td colspan="5" class="empty">No testers yet. Approve a request to create one.</td></tr>`;
     return;
   }
 
-  for (const doc of snapshot.docs) {
+  for (const doc of visible) {
     const data = doc.data();
     const isActive = Boolean(data.active);
     const tr = document.createElement("tr");
@@ -165,6 +169,7 @@ function renderTesters(snapshot) {
             ? `<button class="btn btn--deactivate" data-deactivate="${doc.id}">Deactivate</button>`
             : `<button class="btn btn--approve" data-activate="${doc.id}">Reactivate</button>`
         }
+        <button class="btn btn--deactivate" data-remove="${doc.id}" data-tester-name="${escapeHtml(data.name || data.email || "this tester")}">Remove</button>
       </td>
     `;
     els.testersBody.appendChild(tr);
@@ -317,6 +322,59 @@ async function toggleTester(testerId, active, button) {
   }
 }
 
+async function removeTester(testerId, button) {
+  // Two prompts, deliberately. Remove is the one destructive action here: it
+  // takes someone out of the program AND lets them apply again. A single "are
+  // you sure?" is too easy to click through, and unlike Deactivate it cannot be
+  // undone from this screen.
+  const name = button.dataset.testerName || "this tester";
+  const understood = confirm(
+    `Remove ${name} from the CRP Testing Program?\n\n` +
+      `This takes them out of the program and revokes their testing card.\n` +
+      `Their record and history are kept, and their tester number is retired.\n` +
+      `They will be allowed to apply again.\n\n` +
+      `This cannot be undone from here.`,
+  );
+  if (!understood) return;
+
+  const reason = prompt("Why are they leaving the program? (required)");
+  if (reason === null) return; // cancelled — nothing happened
+  if (!reason.trim()) {
+    toast("A reason is required to remove a tester.", "error");
+    return;
+  }
+
+  setBusy(button, true);
+  try {
+    const token = await auth.currentUser.getIdToken(true);
+    const result = await postToWorker({
+      url: `${WORKER_URL}/tester-remove`,
+      token,
+      body: { testerId, reason },
+    });
+
+    if (result.alreadyRemoved) {
+      toast("Already removed — nothing changed.", "warn");
+    } else if (result.walletRevoked === false) {
+      toast(
+        `Removed${result.testerNumber ? ` — tester #${result.testerNumber} retired` : ""}. ` +
+          "But the card was NOT revoked — reissue it from the Wallet button.",
+        "warn",
+      );
+    } else {
+      toast(
+        result.testerNumber
+          ? `Removed from the program. Tester #${result.testerNumber} retired.`
+          : "Removed from the program.",
+      );
+    }
+  } catch (error) {
+    toast(error.message || "Could not remove the tester.", "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function issueWallet(testerId, button) {
   setBusy(button, true);
   try {
@@ -355,11 +413,13 @@ document.addEventListener("click", (event) => {
   const activate = el.closest("[data-activate]");
   const deactivate = el.closest("[data-deactivate]");
   const walletBtn = el.closest("[data-wallet]");
+  const removeBtn = el.closest("[data-remove]");
 
   if (approve) decideRequest(approve.dataset.approve, "approved", approve);
   else if (reject) decideRequest(reject.dataset.reject, "rejected", reject);
   else if (activate) toggleTester(activate.dataset.activate, true, activate);
   else if (deactivate) toggleTester(deactivate.dataset.deactivate, false, deactivate);
+  else if (removeBtn) removeTester(removeBtn.dataset.remove, removeBtn);
   else if (walletBtn) issueWallet(walletBtn.dataset.wallet, walletBtn);
 });
 

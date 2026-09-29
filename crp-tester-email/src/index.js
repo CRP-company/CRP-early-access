@@ -24,7 +24,7 @@ import { validateSignup, isAllowedOrigin } from "./validate.js";
 import { sendEmail } from "./resend.js";
 import { createFirestore } from "./firestore-rest.js";
 import { requireAdmin, AuthError } from "./auth.js";
-import { decideRequest, setTesterStatus } from "./accept.js";
+import { decideRequest, setTesterStatus, removeTester } from "./accept.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID } from "./wallet.js";
 import { activeForStatus } from "./tester-lifecycle.js";
 
@@ -149,6 +149,52 @@ async function handleAdmin(request, env, body, route, origin) {
     return json(200, { ok: true, ...result }, origin);
   }
 
+  // /tester-remove: remove a tester from the program.
+  //
+  // A dedicated route rather than an overload of /tester-status, because Remove
+  // is a different and far more consequential action: it releases the duplicate
+  // protection, so a confirmation has to be deliberate. It stays behind the same
+  // requireAdmin() check as every other admin route.
+  if (route === "/tester-remove") {
+    const { testerId, reason } = body || {};
+    const result = await removeTester(store, {
+      testerId,
+      reason,
+      actorUid: admin.uid,
+      actorEmail: admin.email,
+    });
+
+    // Revoke the Wallet card after the archive has committed. Same object id, so
+    // this replaces the card already in the applicant's wallet with a REVOKED
+    // one rather than creating a second object. Best-effort: the removal is
+    // already recorded, and a Wallet failure must not make it disappear or
+    // invite a retry that could double-apply.
+    let walletRevoked = false;
+    let saveUrl = null;
+    if (result.removed && !result.alreadyRemoved) {
+      try {
+        saveUrl = await buildSaveUrl({
+          tester: { id: testerId },
+          active: false,
+          testerNumber: result.testerNumber,
+          secretJson: env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON,
+        });
+        walletRevoked = true;
+      } catch (error) {
+        console.error(
+          "wallet revoke after removal failed",
+          JSON.stringify({ testerId, message: error && error.message }),
+        );
+      }
+    }
+
+    return json(
+      200,
+      { ok: true, ...result, walletRevoked, saveUrl },
+      origin,
+    );
+  }
+
   // /tester-wallet: reissue a tester's card on demand.
   //
   // This replaces the `issueWalletPass` Cloud Function. On the Spark plan that
@@ -226,6 +272,9 @@ export default {
     const isAdminRoute =
       url.pathname === "/accept" ||
       url.pathname === "/tester-status" ||
+      // Removal, kept separate from /tester-status because it releases the
+      // duplicate protection and must never be reachable by accident.
+      url.pathname === "/tester-remove" ||
       // Staff reissue of a tester's card. This replaces the `issueWalletPass`
       // Cloud Function, which cannot be deployed on the Spark plan; it reuses
       // the same Wallet module the approval email uses, so there is still only

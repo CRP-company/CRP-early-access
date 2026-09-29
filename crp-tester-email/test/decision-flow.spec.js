@@ -11,7 +11,7 @@
  *   - duplicate protection is unaffected: the requestEmails marker is untouched
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { decideRequest, setTesterStatus } from "../src/accept.js";
+import { decideRequest, setTesterStatus, removeTester } from "../src/accept.js";
 import { META_COLLECTION, COUNTER_DOC } from "../src/tester-lifecycle.js";
 import { buildAcceptanceEmail, buildRejectionEmail } from "../src/decision-emails.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID, CLASS_ID } from "../src/wallet.js";
@@ -62,6 +62,57 @@ function memoryStore(seed = {}) {
       return [...docs.entries()]
         .filter(([k]) => k.startsWith(`${c}/`))
         .map(([k, v]) => ({ id: k.split("/").pop(), ...v }));
+    },
+
+    /**
+     * Atomic archive + marker release, mirroring firestore-rest.js.
+     *
+     * All-or-nothing on purpose: the whole point of the transaction is that a
+     * partial remove is impossible. A stub that applied the writes one at a time
+     * would let a broken implementation pass.
+     */
+    async removeTester({
+      collection,
+      id,
+      patch,
+      updateTime,
+      auditCollection,
+      auditId,
+      auditEntry,
+      releaseCollection = null,
+      releaseId = null,
+    }) {
+      // Staged first, applied only once everything has been validated.
+      const staged = [];
+      const key = `${collection}/${id}`;
+      const cur = docs.get(key);
+      if (!cur || (updateTime && updateTime !== cur.updateTime)) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+      staged.push([key, { ...cur, ...patch, updateTime: bump() }]);
+
+      const aKey = `${auditCollection}/${auditId}`;
+      if (docs.has(aKey)) {
+        // `create` fails on an existing id: a second history entry is impossible.
+        const e = new Error("exists");
+        e.status = 409;
+        throw e;
+      }
+      staged.push([aKey, { ...auditEntry, updateTime: bump() }]);
+
+      if (releaseCollection && releaseId) {
+        // A delete of an absent document is a no-op, as in Firestore.
+        const rKey = `${releaseCollection}/${releaseId}`;
+        staged.push([rKey, null]);
+      }
+
+      for (const [k, v] of staged) {
+        if (v === null) docs.delete(k);
+        else docs.set(k, v);
+      }
+      return { removed: true };
     },
   };
 }
