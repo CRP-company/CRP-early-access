@@ -805,11 +805,14 @@ describe("acceptance email content", () => {
     expect(mail.text).toContain(SAVE_URL);
   });
 
-  it("explains what the card is for and that it may be updated", () => {
+  it("explains what the card is for and that iPhone users need no setup", () => {
     const mail = build();
-    expect(mail.html).toContain("identification for the program");
-    expect(mail.html).toContain("may be updated during the program");
-    expect(mail.text).toContain("identification for the program");
+    // Both the html and the plain-text alternative must carry the same wording:
+    // a text-only client must never receive different information.
+    for (const rendered of [mail.html, mail.text]) {
+      expect(rendered).toContain("helps us verify your identity as a tester");
+      expect(rendered).toContain("no Wallet setup is required");
+    }
   });
 
   it("uses the same CRP branding as the acknowledgement email", () => {

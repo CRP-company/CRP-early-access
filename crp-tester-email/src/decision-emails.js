@@ -17,7 +17,7 @@
 import { escapeHtml, greetingFor } from "./email-template.js";
 
 const DEFAULTS = {
-  logoUrl: "https://i.postimg.cc/K8zf4q4q/CRPlogo.png",
+  logoUrl: "https://github.com/CRP-company/CRP-early-access/blob/main/assets/CRPlogo.png?raw=true",
   siteUrl: "https://crp-company.github.io/CRP-early-access/",
   privacyUrl: "https://crp-company.github.io/CRP-Privacy-policy/",
 };
@@ -149,8 +149,12 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
 
           <tr>
             <td align="center" style="padding:12px 0 28px;">
-              <p style="margin:0 0 10px; font-size:16px; color:#4a4a4a;">Your CRP Testing Card is your identification for the program. Show it whenever you sign in to a CRP session.</p>
-              <p style="margin:0; font-size:16px; color:#4a4a4a;">The card may be updated during the program, so keep it in your wallet rather than as a screenshot.</p>
+              <p style="margin:0; font-size:15px; color:#666;">
+                Your CRP Tester Card helps us verify your identity as a tester.
+              </p>
+              <p style="margin:8px 0 0; font-size:15px; color:#666;">
+                Using an iPhone? You're all set — no Wallet setup is required.
+              </p>
             </td>
           </tr>`;
 
@@ -167,9 +171,9 @@ export function buildAcceptanceEmail({ name, email, testerNumber, saveUrl }) {
     "ADD TO GOOGLE WALLET:",
     saveUrl,
     "",
-    "Your CRP Testing Card is your identification for the program. Show it whenever you sign in to a CRP session.",
+    "Your CRP Tester Card helps us verify your identity as a tester.",
     "",
-    "The card may be updated during the program, so keep it in your wallet rather than as a screenshot.",
+    "Using an iPhone? You're all set — no Wallet setup is required.",
     ...footerText(),
   ].join("\n");
 

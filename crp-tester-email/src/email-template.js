@@ -13,7 +13,7 @@
  */
 
 const DEFAULTS = {
-  logoUrl: "https://i.postimg.cc/K8zf4q4q/CRPlogo.png",
+  logoUrl: "https://github.com/CRP-company/CRP-early-access/blob/main/assets/CRPlogo.png?raw=true",
   heroUrl:
     "https://www.image2url.com/r2/default/images/1776869274976-74e932ff-18d5-462e-885b-c6ed42d42bcf.png",
   siteUrl: "https://crp-company.github.io/CRP-early-access/",
