@@ -40,3 +40,9 @@ coverage/
 # copy from. This negation has to come after the patterns above to win.
 !.env.example
 !**/.env.example
+
+# Tester roster exports. scripts/list-testers.js writes real names and email
+# addresses, so an exported CSV must never be committed. Regenerate it locally
+# with `node scripts/list-testers.js --csv > testers.csv` whenever it is needed.
+testers.csv
+testers-*.csv
