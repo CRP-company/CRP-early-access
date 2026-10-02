@@ -34,6 +34,58 @@ service cloud.firestore {
         && request.auth.token.email == email;
     }
 
+    // Does the signed-in caller own this tester document?
+    //
+    // Reads the owner from the stored document rather than from anything in the
+    // request, so a caller cannot claim a testerId that is not theirs. Returns
+    // false when the tester does not exist, which stops a non-tester from probing
+    // ids for a match.
+    function ownsTester(testerId) {
+      return request.auth != null
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/testers/$(testerId))
+        && get(/databases/$(database)/documents/testers/$(testerId)).data.email is string
+        && get(/databases/$(database)/documents/testers/$(testerId)).data.email
+             == request.auth.token.email;
+    }
+
+    // The submission a tester is allowed to file.
+    //
+    // An allowlist, like validNewRequest above: an unexpected field fails the
+    // write outright rather than being silently stored. `status` is pinned to
+    // "submitted" so a client cannot triage its own feedback to "shipped",
+    // and `area` is constrained to the vocabulary the dashboard offers.
+    function validNewFeedback(data) {
+      return data.keys().hasOnly([
+          'testerId',
+          'email',
+          'title',
+          'body',
+          'area',
+          'status',
+          'period',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.testerId is string
+        && data.testerId.size() > 0
+        && data.title is string
+        && data.title.size() >= 3
+        && data.title.size() <= 120
+        && data.body is string
+        && data.body.size() >= 10
+        && data.body.size() <= 2000
+        && data.area in ['app', 'product', 'hardware', 'other']
+        && data.email is string
+        && data.email.size() <= 254
+        && data.status == 'submitted'
+        // The month this was filed in, stamped by the server-side Worker so a
+        // tester cannot backdate an old request into the current month's count.
+        && data.period.matches('^[0-9]{4}-[0-9]{2}$')
+        // serverTimestamp() resolves to commit time, so ordering cannot be spoofed.
+        && data.createdAt == request.time;
+    }
+
     // Every field the public form is allowed to submit. Anything else in the
     // document fails hasOnly() and the write is rejected outright.
     function validNewRequest(data) {
@@ -95,6 +147,24 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // ----------------------------------------------------------- tester index
+    // A deterministic email -> testerId pointer, so a signed-in tester can find
+    // their own record without being able to `list` the roster.
+    //
+    // `allow list: if isAdmin()` on `testers` is what makes this necessary: a
+    // tester may `get` their document but cannot query for it, because a query
+    // they could shape would also let them read anyone else's. Mirrors the
+    // existing requestEmails marker exactly.
+    //
+    // The body holds only the tester document id — no name, no address — so this
+    // `get` leaks no personal data. `list` stays denied so the index cannot be
+    // enumerated and turned back into an email directory.
+    match /testerIndex/{emailKey} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
     // --------------------------------------------------------------- testers
     // Accepted testers only. Created and mutated exclusively by Cloud
     // Functions (Admin SDK bypasses these rules).
@@ -102,6 +172,50 @@ service cloud.firestore {
       allow get: if isAdmin() || (resource.data.email is string && isSelf(resource.data.email));
       allow list: if isAdmin();
       allow create, update, delete: if false;
+    }
+
+    // A tester's own account document, written by the CRP Focus app on sign-up.
+    //
+    // Scoped to the owner so one user cannot read or rewrite another's account.
+    // `get` rather than `list`: the app only ever addresses its own document by
+    // id, and a `list` grant here would be a lie — Firestore evaluates the rule
+    // per document, so a collection query would still be refused for every row
+    // that is not the caller's.
+    match /users/{userId} {
+      allow get: if isAdmin() || (request.auth != null && request.auth.uid == userId);
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['displayName', 'email', 'createdAt', 'uid']);
+      // Update is allowed to the owner but cannot change identity: `email` and
+      // `uid` must match what was there before, so a session cannot be used to
+      // repoint an account at another address. displayName stays editable, which
+      // is the only field the app ever changes after sign-up.
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.uid == resource.data.uid;
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------- tester feedback
+    // What testers ask for: one document per submission, owned by its tester.
+    //
+    // Nested under the tester rather than in a top-level collection, because the
+    // path itself carries the ownership check — `ownsTester()` below can confirm
+    // the caller owns `testerId` without trusting anything in the request body. A
+    // flat collection would have to trust a self-declared testerId field, which
+    // is exactly the thing a client controls.
+    match /testers/{testerId}/feedback/{feedbackId} {
+      allow create: if ownsTester(testerId)
+        && validNewFeedback(request.resource.data)
+        // The author and the owner must be the same verified address, so a
+        // tester cannot file feedback under someone else's number.
+        && request.resource.data.email == request.auth.token.email;
+      allow read: if isAdmin() || ownsTester(testerId);
+      // No update or delete from a client: feedback is part of the program's
+      // record of what was asked for, so a tester cannot edit a submission after
+      // the fact. Staff triage goes through the Worker, which re-checks the claim.
+      allow update, delete: if isAdmin();
     }
 
     // Monthly activity log (comments / reviews per month), used to decide

@@ -84,6 +84,47 @@ export function __resetKeyCache() {
  * @throws {AuthError} 401 when unauthenticated/invalid, 403 when not staff.
  */
 export async function requireAdmin(request, projectId) {
+  const payload = await verifyIdToken(request, projectId);
+
+  if (payload.admin !== true) {
+    throw new AuthError(403, "This action is restricted to CRP staff.");
+  }
+
+  return { uid: payload.user_id || payload.sub || "", email: payload.email || "" };
+}
+
+/**
+ * Verify a Firebase ID token and return the identity, with no claim requirement.
+ *
+ * Split out of requireAdmin() so the tester routes can start from the same
+ * signature, issuer and audience checks. A tester is a real signed-in user, not
+ * staff — requiring the admin claim here would be wrong, and re-implementing the
+ * verification would be a second copy of the security-critical code to keep in
+ * step with this one.
+ *
+ * @returns {Promise<{uid: string, email: string}>}
+ * @throws {AuthError} 401 when unauthenticated/invalid or the token has no email.
+ */
+export async function requireUser(request, projectId) {
+  const payload = await verifyIdToken(request, projectId);
+
+  const email = payload.email || "";
+  if (!email) {
+    throw new AuthError(401, "Your account has no email address.");
+  }
+
+  return { uid: payload.user_id || payload.sub || "", email };
+}
+
+/**
+ * Verify the signature, expiry, audience and issuer of an ID token.
+ *
+ * The shared core of requireAdmin() and requireUser(). Returns the decoded
+ * payload so the caller applies its own claim policy.
+ *
+ * @throws {AuthError} 401 for anything that fails verification.
+ */
+async function verifyIdToken(request, projectId) {
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) throw new AuthError(401, "Missing bearer token.");
@@ -129,9 +170,5 @@ export async function requireAdmin(request, projectId) {
   const issuer = `https://securetoken.google.com/${projectId}`;
   if (payload.iss !== issuer) throw new AuthError(401, "Unexpected token issuer.");
 
-  if (payload.admin !== true) {
-    throw new AuthError(403, "This action is restricted to CRP staff.");
-  }
-
-  return { uid: payload.user_id || payload.sub || "", email: payload.email || "" };
+  return payload;
 }

@@ -52,7 +52,19 @@ const els = {
   requestDetails: document.getElementById("request-details"),
   requestDetailsContent: document.getElementById("request-details-content"),
   requestDetailsClose: document.getElementById("request-details-close"),
+  feedbackBody: document.getElementById("feedback-body"),
+  feedbackCount: document.getElementById("feedback-count"),
+  feedbackFilter: document.getElementById("feedback-filter"),
 };
+
+const AREA_LABELS = {
+  app: "CRP Focus app",
+  product: "Product",
+  hardware: "Hardware",
+  other: "Other",
+};
+
+let allFeedback = [];
 
 let auth = null;
 let db = null;
@@ -211,6 +223,62 @@ function renderTesters(snapshot) {
 
 let unsubscribeRequests = null;
 let unsubscribeTesters = null;
+
+/**
+ * Load every tester's requests from the Worker.
+ *
+ * Fetched rather than subscribed: Firestore cannot watch a set of per-tester
+ * subcollections in one query, and the Worker assembles them into a single list.
+ * Refreshed on demand and whenever the roster changes, which is enough for a
+ * review queue.
+ */
+async function loadFeedback() {
+  if (!WORKER_URL) return; // warnIfWorkerUnconfigured() already said so.
+
+  try {
+    const token = await auth.currentUser.getIdToken(true);
+    const result = await postToWorker({ url: `${WORKER_URL}/feedback-list`, token, body: {} });
+    allFeedback = result.feedback || [];
+    renderFeedback();
+  } catch (error) {
+    // A failure here must not take the rest of the dashboard down; the roster is
+    // the part an admin cannot work without.
+    console.warn("CRP: could not load tester feedback", error);
+  }
+}
+
+function renderFeedback() {
+  const area = els.feedbackFilter.value;
+  const visible = area === "all" ? allFeedback : allFeedback.filter((f) => f.area === area);
+
+  els.feedbackBody.innerHTML = "";
+  els.feedbackCount.textContent = visible.length;
+
+  if (visible.length === 0) {
+    els.feedbackBody.innerHTML =
+      `<tr><td colspan="4" class="empty">No requests yet.</td></tr>`;
+    return;
+  }
+
+  for (const entry of visible) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>
+        <strong>${escapeHtml(entry.title)}</strong>
+        <div class="muted">${escapeHtml(entry.body)}</div>
+      </td>
+      <td>
+        ${escapeHtml(entry.testerName || "—")}
+        ${entry.testerNumber ? `<div class="muted mono">#${entry.testerNumber}</div>` : ""}
+      </td>
+      <td><span class="pill pill--pending">${escapeHtml(AREA_LABELS[entry.area] || entry.area)}</span></td>
+      <td>${formatDate(entry.createdAt)}</td>
+    `;
+    els.feedbackBody.appendChild(tr);
+  }
+}
+
+els.feedbackFilter.addEventListener("change", renderFeedback);
 
 function subscribeRequests() {
   const status = els.requestFilter.value;
@@ -494,6 +562,9 @@ function showApp() {
   els.login.hidden = true;
   els.app.hidden = false;
   startSubscriptions();
+  // Awaited nowhere on purpose: the roster renders from its own live
+  // subscription, and the request queue should not wait on this fetch.
+  loadFeedback();
   warnIfWorkerUnconfigured();
 }
 

@@ -93,6 +93,32 @@
         </table>
       </div>
     </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2>Tester requests <span class="count" id="feedback-count">0</span></h2>
+        <select id="feedback-filter" aria-label="Filter feedback by area">
+          <option value="all" selected>All areas</option>
+          <option value="app">CRP Focus app</option>
+          <option value="product">Product</option>
+          <option value="hardware">Hardware</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <p class="panel__hint">
+        What testers have asked for, newest first. Testers are asked for at least
+        two a month — that is the activity the program runs on.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Request</th><th>Tester</th><th>Area</th><th>Received</th></tr>
+          </thead>
+          <tbody id="feedback-body"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <dialog id="request-details" class="request-details" aria-labelledby="request-details-title">

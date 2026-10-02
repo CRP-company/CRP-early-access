@@ -23,12 +23,60 @@ import { buildApplicationReceivedEmail } from "./email-template.js";
 import { validateSignup, isAllowedOrigin } from "./validate.js";
 import { sendEmail } from "./resend.js";
 import { createFirestore } from "./firestore-rest.js";
-import { requireAdmin, AuthError } from "./auth.js";
+import { requireAdmin, requireUser, AuthError } from "./auth.js";
+import { isAllowedAdminEmail } from "./admin-access.js";
 import { decideRequest, setTesterStatus, removeTester } from "./accept.js";
+import {
+  findTesterByEmail,
+  canSubmitFeedback,
+  validateFeedback,
+  buildFeedbackDoc,
+  currentPeriod,
+  hashEmail,
+  MONTHLY_TARGET,
+  PortalError,
+} from "./tester-portal.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID } from "./wallet.js";
 import { activeForStatus } from "./tester-lifecycle.js";
 
 const TESTERS = "testers";
+
+// ---------------------------------------------------------------- feedback
+
+/**
+ * Every tester's feedback, newest first, for the admin dashboard.
+ *
+ * Collected by walking the roster and listing each tester's feedback
+ * subcollection rather than with a collection-group query: the roster is small,
+ * and `listCollection` is the only listing primitive this REST client has. A
+ * collection-group query would need a structured Firestore query body, which is a
+ * larger change than the problem warrants here.
+ *
+ * Annotates each entry with its tester, because the stored document only carries
+ * the owner's id — the dashboard needs a name to show.
+ */
+async function listAllFeedback(store) {
+  const roster = await store.listCollection(TESTERS);
+  const collected = [];
+
+  for (const tester of roster) {
+    if (tester.removed) continue;
+    const entries = await store.listSubcollection(`${TESTERS}/${tester.id}`, "feedback");
+    for (const entry of entries) {
+      collected.push({
+        ...entry,
+        testerId: tester.id,
+        testerName: tester.name || tester.email || tester.id,
+        testerNumber:
+          typeof tester.testerNumber === "number" ? tester.testerNumber : null,
+      });
+    }
+  }
+
+  return collected.sort((a, b) =>
+    String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+  );
+}
 
 // Only the live site may call this. Configurable so a staging deploy can point
 // elsewhere, but the default is the production origin.
@@ -101,6 +149,141 @@ function handleOptions(request, env) {
 }
 
 /**
+ * Tester routes: /tester-me, /tester-check, /feedback.
+ *
+ * Authenticated, but with no `admin` requirement — a tester is a program member,
+ * not staff. What replaces it is stronger in the way that matters: the caller is
+ * identified by their verified email, their roster record is resolved from that,
+ * and every route acts only on that record. There is no route that accepts a
+ * testerId, so a tester cannot address anyone else's data even by guessing ids.
+ */
+async function handleTester(request, env, body, route, origin) {
+  const projectId = env.FIREBASE_PROJECT_ID;
+  if (!projectId) return json(500, { ok: false, error: "Server not configured." }, origin);
+
+  const sa = env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!sa) return json(500, { ok: false, error: "Server not configured." }, origin);
+
+  let caller;
+  try {
+    caller = await requireUser(request, projectId);
+  } catch (error) {
+    if (error instanceof AuthError) {
+      return json(error.status, { ok: false, error: error.message }, origin);
+    }
+    throw error;
+  }
+
+  const email = caller.email.trim().toLowerCase();
+  // Pinned to the same project the token was verified against, so identity and
+  // data can never drift onto different projects.
+  const store = createFirestore(sa, projectId);
+
+  // /tester-check: is this address on the roster, and may it create a password?
+  //
+  // Deliberately does NOT require a token, because its whole purpose is to be
+  // called *before* someone has one — that is the "you have no password yet" path.
+  // It reveals only whether an address is an active tester, which is the same
+  // thing the person already knows about themselves, and it never returns the
+  // roster. `activeForStatus` means a revoked tester cannot use this to
+  // re-provision themselves.
+  if (route === "/tester-check") {
+    const requested = body && typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!requested) return json(400, { ok: false, error: "email is required." }, origin);
+
+    const tester = await findTesterByEmail(store, requested);
+    if (!tester) {
+      return json(404, { ok: false, error: "That email is not on the CRP tester list." }, origin);
+    }
+    const permission = canSubmitFeedback(tester);
+    if (!permission.allowed) {
+      return json(
+        403,
+        { ok: false, error: "That tester account is not currently active." },
+        origin,
+      );
+    }
+    return json(200, { ok: true, onRoster: true, name: tester.name || null }, origin);
+  }
+
+  const tester = await findTesterByEmail(store, email);
+  if (!tester) {
+    return json(
+      403,
+      { ok: false, error: "Your account is not on the CRP tester list." },
+      origin,
+    );
+  }
+
+  // /tester-me: everything the dashboard needs on load, in one call.
+  if (route === "/tester-me") {
+    const permission = canSubmitFeedback(tester);
+    const history = await store.listSubcollection(`${TESTERS}/${tester.id}/feedback`);
+    const period = currentPeriod();
+    const thisMonth = history.filter((f) => f.period === period).length;
+
+    return json(
+      200,
+      {
+        ok: true,
+        tester: {
+          id: tester.id,
+          name: tester.name || null,
+          email: tester.email,
+          testerNumber: typeof tester.testerNumber === "number" ? tester.testerNumber : null,
+          status: tester.status,
+          active: permission.allowed,
+          // Why the dashboard greys out the form, in the tester's own words.
+          blockedReason: permission.allowed ? null : permission.reason,
+        },
+        activity: {
+          period,
+          submitted: thisMonth,
+          target: MONTHLY_TARGET,
+          met: thisMonth >= MONTHLY_TARGET,
+        },
+        feedback: history
+          .slice()
+          .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+          .slice(0, 25),
+      },
+      origin,
+    );
+  }
+
+  // /feedback: file a request.
+  //
+  // Revoked and removed testers are refused here, not just hidden in the UI, so
+  // holding an open tab from before a revocation does not grant extra submissions.
+  if (route === "/feedback") {
+    const permission = canSubmitFeedback(tester);
+    if (!permission.allowed) {
+      return json(
+        403,
+        { ok: false, error: "Your tester account is not currently active, so feedback is closed." },
+        origin,
+      );
+    }
+
+    const validated = validateFeedback(body);
+    if (!validated.ok) {
+      return json(400, { ok: false, error: validated.error }, origin);
+    }
+
+    const doc = buildFeedbackDoc(validated, { tester, email });
+    // Auto-id: the Worker owns the id, so a client cannot overwrite an existing
+    // submission by guessing its document id.
+    const feedbackId = crypto.randomUUID();
+
+    await store.createDocument(`${TESTERS}/${tester.id}/feedback`, feedbackId, doc);
+
+    return json(201, { ok: true, id: feedbackId, period: doc.period }, origin);
+  }
+
+  return json(404, { ok: false, error: "Not found." }, origin);
+}
+
+/**
  * Admin routes: /accept and /tester-status.
  *
  * These write to Firestore with a service account, which bypasses security
@@ -127,9 +310,36 @@ async function handleAdmin(request, env, body, route, origin) {
     throw error;
   }
 
+  // Second, independent gate on top of the admin claim: the address itself must
+  // be on CRP's staff allowlist. The claim says "this account was marked staff";
+  // this says "and it is one of ours". Checked here, in the Worker, because that
+  // is the only place a check cannot be skipped by editing the dashboard.
+  if (!isAllowedAdminEmail(admin.email, env.ADMIN_EMAILS)) {
+    console.warn(
+      "admin route refused",
+      JSON.stringify({ path: route, email: admin.email || null }),
+    );
+    return json(
+      403,
+      { ok: false, error: "This account is not authorised for the CRP admin dashboard." },
+      origin,
+    );
+  }
+
   // Pinned to the same project the caller's token was verified against, so
   // authorisation and data can never drift onto different projects.
   const store = createFirestore(sa, projectId);
+
+  // /feedback-list: everything testers have asked for.
+  //
+  // Read-only, and it comes before the /accept branch purely because it needs no
+  // input. Like every other admin route it sits behind requireAdmin() AND the
+  // staff allowlist, so it is not a way to read tester feedback without being
+  // one of the two CRP addresses.
+  if (route === "/feedback-list") {
+    const feedback = await listAllFeedback(store);
+    return json(200, { ok: true, feedback }, origin);
+  }
 
   if (route === "/accept") {
     const { requestId, decision, note } = body || {};
@@ -279,9 +489,19 @@ export default {
       // Cloud Function, which cannot be deployed on the Spark plan; it reuses
       // the same Wallet module the approval email uses, so there is still only
       // one Wallet implementation.
-      url.pathname === "/tester-wallet";
+      url.pathname === "/tester-wallet" ||
+      // Read every tester's feedback, so the dashboard can show what testers are
+      // asking for alongside the roster.
+      url.pathname === "/feedback-list";
 
-    if (url.pathname !== "/send" && !isAdminRoute) {
+    // Tester-facing routes. No admin claim: a tester is a program member, and the
+    // handler resolves their roster record from their verified email instead.
+    const isTesterRoute =
+      url.pathname === "/tester-me" ||
+      url.pathname === "/tester-check" ||
+      url.pathname === "/feedback";
+
+    if (url.pathname !== "/send" && !isAdminRoute && !isTesterRoute) {
       return json(404, { ok: false, error: "Not found." });
     }
 
@@ -308,6 +528,30 @@ export default {
       body = await request.json();
     } catch {
       return json(400, { ok: false, error: "Invalid JSON body." }, origin);
+    }
+
+    if (isTesterRoute) {
+      try {
+        return await handleTester(request, env, body, url.pathname, origin);
+      } catch (error) {
+        const status = error && (error.status || error.statusCode);
+        console.error(
+          "tester route failed",
+          JSON.stringify({ path: url.pathname, status, message: error && error.message }),
+        );
+        return json(
+          status && status < 600 ? status : 500,
+          {
+            ok: false,
+            // 4xx messages are written for the tester, so pass them through.
+            // Anything else stays generic rather than leaking an internal detail.
+            error: [400, 403, 404, 409].includes(status)
+              ? error.message
+              : "Could not complete that request. Please try again.",
+          },
+          origin,
+        );
+      }
     }
 
     if (isAdminRoute) {

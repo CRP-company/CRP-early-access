@@ -281,6 +281,13 @@ const env = {
   RESEND_API_KEY: "re_test",
   ALLOWED_ORIGINS: ORIGIN,
   FIREBASE_PROJECT_ID: PROJECT,
+  // The admin routes are gated on an email allowlist as well as the admin claim
+  // (see src/admin-access.js). The harness mints its token as staff@crp.com, so
+  // that address is allowlisted here explicitly rather than relying on the
+  // production default — the same way ALLOWED_ORIGINS is set above. A test that
+  // wanted to prove the allowlist bites should pass a different one; see
+  // test/portal.spec.js.
+  ADMIN_EMAILS: "staff@crp.com",
 };
 
 /**

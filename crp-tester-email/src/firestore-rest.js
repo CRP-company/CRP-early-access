@@ -110,6 +110,25 @@ export function createFirestore(secretJson, projectId) {
   const docPath = (collection, id) =>
     `projects/${projectId}/databases/(default)/documents/${collection}/${id}`;
 
+  // Firestore document paths are slash-separated, so a subcollection is just a
+  // deeper path. These two helpers accept one and split it back into the
+  // (collection, id) pair the existing functions expect, which is what lets
+  // `createDocument("testers/t1/feedback", id, doc)` work without duplicating
+  // every method below.
+  function splitPath(path) {
+    const parts = String(path).split("/").filter(Boolean);
+    if (parts.length < 2 || parts.length % 2 !== 0) {
+      throw new Error(
+        `Firestore path must be an even number of segments (collection/document[/...]), got "${path}".`,
+      );
+    }
+    return { collection: parts[0], id: parts[1] };
+  }
+
+  function pathUrl(path) {
+    return new URL(`${base}/${String(path).replace(/^\/+|\/+$/g, "")}`);
+  }
+
   async function authHeaders() {
     return {
       Authorization: `Bearer ${await getAccessToken(secretJson)}`,
@@ -117,9 +136,14 @@ export function createFirestore(secretJson, projectId) {
     };
   }
 
-  /** Fetch a document. Returns null when it does not exist. */
+  /**
+   * Fetch a document. Returns null when it does not exist.
+   *
+   * `collection` may be a nested path like "testers/t1/feedback", which is what
+   * subcollection callers pass.
+   */
   async function getDocument(collection, id, options = {}) {
-    const url = new URL(docName(collection, id));
+    const url = pathUrl(`${collection}/${id}`);
     if (options.transaction) {
       url.searchParams.set("transaction", options.transaction);
     }
@@ -138,7 +162,7 @@ export function createFirestore(secretJson, projectId) {
    * The tester-number counter relies on exactly this.
    */
   async function createDocument(collection, id, data) {
-    const res = await fetch(`${docName(collection, id)}?currentDocument.exists=false`, {
+    const res = await fetch(`${pathUrl(`${collection}/${id}`)}?currentDocument.exists=false`, {
       method: "PATCH",
       headers: await authHeaders(),
       body: JSON.stringify({ fields: encodeFields(data) }),
@@ -169,7 +193,7 @@ export function createFirestore(secretJson, projectId) {
    *   read-modify-write; omit it only for idempotent, non-counter writes.
    */
   async function updateDocument(collection, id, data, options = {}) {
-    const url = new URL(docName(collection, id));
+    const url = pathUrl(`${collection}/${id}`);
     if (options.updateTime) {
       url.searchParams.set("currentDocument.updateTime", options.updateTime);
     } else {
@@ -251,6 +275,8 @@ export function createFirestore(secretJson, projectId) {
    * Used to find an existing tester by email. The roster is small, so a full
    * scan is acceptable and avoids maintaining a separate email index.
    *
+   * `collection` may be a nested path like "testers/t1/feedback".
+   *
    * @returns {Promise<Array<{id: string} & Record<string, any>>>}
    */
   async function listCollection(collection) {
@@ -258,7 +284,7 @@ export function createFirestore(secretJson, projectId) {
     let pageToken = null;
 
     do {
-      const url = new URL(`${base}/${collection}`);
+      const url = pathUrl(collection);
       url.searchParams.set("pageSize", "300");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
 
@@ -429,11 +455,55 @@ export function createFirestore(secretJson, projectId) {
     }
   }
 
+  /**
+   * Delete a document.
+   *
+   * Used to release a lookup pointer when a tester leaves the program. A missing
+   * document is reported as a 404 error rather than swallowed, so the caller can
+   * distinguish "already gone" from a real failure.
+   *
+   * Firestore's Write has no `delete` verb, so this is a standalone DELETE against
+   * the document resource.
+   */
+  async function deleteDocument(collection, id) {
+    const res = await fetch(pathUrl(`${collection}/${id}`), {
+      method: "DELETE",
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      const err = new Error(`delete ${collection}/${id} failed (${res.status}): ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
+    return true;
+  }
+
+  /**
+   * List a subcollection's documents, e.g. "testers/t1/feedback".
+   *
+   * A named alias rather than just passing the nested path to listCollection,
+   * because the pairing matters: listCollection takes a *collection*, while this
+   * takes a *parent document path*. Two similarly-shaped string arguments with
+   * opposite meanings is exactly the kind of thing that is wrong by accident at
+   * a call site and nowhere else.
+   *
+   * @param {string} parentPath  e.g. "testers/t1"
+   * @param {string} subcollection  e.g. "feedback"
+   */
+  async function listSubcollection(parentPath, subcollection) {
+    // Validate before building a URL out of it: a malformed path should fail
+    // here with a clear message, not as an opaque 400 from the API.
+    splitPath(parentPath);
+    return listCollection(`${parentPath}/${subcollection}`);
+  }
+
   return {
     getDocument,
     createDocument,
     updateDocument,
+    deleteDocument,
     listCollection,
+    listSubcollection,
     beginTransaction,
     commit,
     rollback,

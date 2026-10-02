@@ -1,0 +1,350 @@
+/* CRP tester dashboard.
+ *
+ * Deliberately shares the landing page's visual language — white ground, the same
+ * faint grid overlay, pill-shaped controls, black as the only accent — so a
+ * tester moving from crp.company to this page sees one product rather than two.
+ * The landing page's own stylesheet is not imported: these pages must stay
+ * servable as static files with no build step.
+ */
+
+:root {
+  --bg: #ffffff;
+  --surface: #f6f6f4;
+  --border: #e2e2df;
+  --text: #1a1a1a;
+  --muted: #6f6f6b;
+  --accent: #000000;
+  --ok-fg: #1b5e20;
+  --ok-bg: #e8f5e9;
+  --warn-fg: #8a5300;
+  --warn-bg: #fff4e5;
+  --danger-fg: #a1201a;
+  --danger-bg: #fdecea;
+  --radius: 20px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+/* The landing page's grid overlay. pointer-events:none so it never eats a click. */
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+
+/* ------------------------------------------------------------------- login */
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1.5rem;
+}
+
+.login__card {
+  width: 100%;
+  max-width: 400px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+}
+
+.badge {
+  display: inline-block;
+  font-family: 'Space Grotesk', monospace;
+  font-weight: 500;
+  font-size: 0.8rem;
+  letter-spacing: 0.5px;
+  color: #2c2c2c;
+  border: 1px solid var(--border);
+  padding: 0.35rem 1rem;
+  border-radius: 40px;
+}
+
+h1 {
+  font-family: 'Bitcount Single', system-ui;
+  font-weight: 400;
+  font-size: 2.2rem;
+  letter-spacing: -0.02em;
+  margin: 1.25rem 0 0.5rem;
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+  color: var(--muted);
+  margin: 1.25rem 0 0.4rem;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  font: inherit;
+  font-size: 0.95rem;
+  background: #fff;
+  border: 1px solid #eaeaea;
+  border-radius: 18px;
+  outline: none;
+  color: #111;
+  transition: border-color 0.2s ease;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #a0a0a0;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+
+.btn {
+  background: #000;
+  color: #fff;
+  border: none;
+  padding: 0.9rem 1.75rem;
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 0.95rem;
+  border-radius: 40px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+  letter-spacing: -0.2px;
+}
+
+.btn:hover:not(:disabled) {
+  background: #2b2b2b;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  background: #b0b0b0;
+  cursor: not-allowed;
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.7rem 1.25rem;
+  font-size: 0.88rem;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.btn--block {
+  width: 100%;
+  margin-top: 1.5rem;
+}
+
+.btn--small {
+  padding: 0.55rem 1.1rem;
+  font-size: 0.85rem;
+}
+
+.alert {
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+  border-radius: 14px;
+  font-size: 0.88rem;
+}
+
+.alert--error {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.alert--info {
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.alert[hidden] {
+  display: none;
+}
+
+/* -------------------------------------------------------------------- app */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 40px;
+  padding: 0.2rem 0.65rem;
+}
+
+.pill--ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+.pill--warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+.pill--bad {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+/* Two dots for the monthly target: filled once a submission is filed. */
+.target {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid #cfcfcf;
+}
+
+.dot--on {
+  background: #000;
+  border-color: #000;
+}
+
+.entry {
+  padding: 1rem 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.entry:last-child {
+  border-bottom: none;
+}
+
+.entry__title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 0.25rem;
+}
+
+.entry__body {
+  font-size: 0.88rem;
+  color: #4a4a4a;
+  overflow-wrap: anywhere;
+}
+
+.entry__meta {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.75rem;
+  color: #9a9a96;
+  margin-top: 0.4rem;
+}
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 1.5rem 0;
+  font-size: 0.9rem;
+}
+
+.footer {
+  text-align: center;
+  font-size: 0.78rem;
+  color: #a8a8a4;
+  margin-top: 2.5rem;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
+
+@media (max-width: 540px) {
+  .wrap {
+    padding: 2rem 1rem 3rem;
+  }
+  h1 {
+    font-size: 1.8rem;
+  }
+}

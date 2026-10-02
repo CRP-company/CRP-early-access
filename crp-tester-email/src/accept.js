@@ -20,6 +20,7 @@ import { sendEmail } from "./resend.js";
 const REQUESTS = "requests";
 const TESTERS = "testers";
 const REQUEST_EMAILS = "requestEmails";
+const TESTER_INDEX = "testerIndex";
 const AUDIT = "audit";
 const ISSUER_ID = "3388000000023210330";
 
@@ -101,6 +102,45 @@ async function writeAudit(store, entry) {
     await store.createDocument("audit", id, entry);
   } catch {
     // Intentionally swallowed.
+  }
+}
+
+/**
+ * Point a tester's email at their tester document.
+ *
+ * Without this the tester dashboard cannot find anyone's record:
+ * `allow list: if isAdmin()` on `testers` stops a tester querying for their own
+ * document, so the dashboard needs a deterministic key to `get` instead. The body
+ * holds only the tester id, which is why `testerIndex` can be world-readable.
+ *
+ * Best-effort, deliberately. The tester and their number are already committed by
+ * the time this runs; a failure here must not roll back an acceptance or invite a
+ * retry that burns a second number. It is repaired by re-approving, and the
+ * dashboard's error message points a stuck tester at CRP rather than silently
+ * showing an empty account.
+ */
+async function writeTesterIndex(store, { email, testerId }) {
+  if (!email) return false;
+  try {
+    const markerId = await hashEmail(email);
+    const existing = await store.getDocument(TESTER_INDEX, markerId);
+
+    // Only write when the pointer is absent or wrong. A correct pointer is left
+    // alone, so a repeat approval does not generate a pointless write.
+    if (existing && existing.testerId === testerId) return true;
+
+    if (existing) {
+      await store.updateDocument(TESTER_INDEX, markerId, { testerId, updatedAt: new Date() });
+    } else {
+      await store.createDocument(TESTER_INDEX, markerId, { testerId, createdAt: new Date() });
+    }
+    return true;
+  } catch (error) {
+    console.error(
+      "tester index write failed",
+      JSON.stringify({ testerId, message: error && error.message }),
+    );
+    return false;
   }
 }
 
@@ -267,6 +307,10 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
     const linked = await store.getDocument(TESTERS, canonical);
     const linkedNumber = typeof linked?.testerNumber === "number" ? linked.testerNumber : null;
 
+    // The pointer should already exist for a linked tester, but a tester accepted
+    // before the index existed would not have one. Cheap to guarantee here.
+    await writeTesterIndex(store, { email: request.email, testerId: canonical });
+
     const saveUrl = linkedNumber
       ? await issueWalletPass({ store, env, testerId: canonical, testerNumber: linkedNumber, request })
       : null;
@@ -329,6 +373,10 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
 
   // Status was already claimed atomically above; only the link is new here.
   await store.updateDocument(REQUESTS, requestId, { testerId });
+
+  // The dashboard's lookup pointer. Written before the Wallet pass and the email,
+  // so a tester who reads their acceptance email can already sign in.
+  await writeTesterIndex(store, { email: request.email, testerId });
 
   // Everything the email needs is now durably stored: the tester exists, the
   // number is allocated, and the request is decided. The Wallet pass is
@@ -531,6 +579,27 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
       throw new AcceptError(409, "This tester changed while removing. Try again.");
     }
     throw error;
+  }
+
+  // Drop the dashboard lookup pointer, so the removed tester stops resolving to a
+  // record instead of seeing a dashboard they no longer belong to.
+  //
+  // Deliberately NOT part of the transaction above: the removal is already
+  // committed and authoritative, and a failure to tidy the pointer must not turn
+  // a successful removal into an error the admin retries. The dashboard would then
+  // show them as removed, which is the correct outcome anyway.
+  if (releaseId) {
+    try {
+      await store.deleteDocument(TESTER_INDEX, releaseId);
+    } catch (error) {
+      // 404 is fine — the pointer was never created for this tester.
+      if (!error || error.status !== 404) {
+        console.error(
+          "tester index release failed",
+          JSON.stringify({ testerId, message: error && error.message }),
+        );
+      }
+    }
   }
 
   return {

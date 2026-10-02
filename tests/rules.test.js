@@ -271,6 +271,158 @@ test("email marker cannot carry extra fields", async () => {
   );
 });
 
+/** A feedback body that satisfies every rule. */
+function validFeedback(overrides = {}) {
+  return {
+    testerId: "t_seed",
+    email: "tester@example.com",
+    title: "Add a dark mode",
+    body: "The display is bright at night. A dark theme would help.",
+    area: "app",
+    status: "submitted",
+    period: "2026-02",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  };
+}
+
+/* -------------------------------------------------- tester feedback: ownership */
+
+test("tester CAN file feedback on their own record", async () => {
+  await assertSucceeds(
+    setDoc(doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f1"), validFeedback()),
+  );
+});
+
+test("anonymous visitor CANNOT file feedback", async () => {
+  await assertFails(
+    setDoc(doc(anon(), "testers", "t_seed", "feedback", "f2"), validFeedback()),
+  );
+});
+
+test("signed-in non-tester CANNOT file feedback", async () => {
+  await assertFails(
+    setDoc(
+      doc(asUser("u9", "stranger@example.com"), "testers", "t_seed", "feedback", "f3"),
+      validFeedback({ email: "stranger@example.com" }),
+    ),
+  );
+});
+
+// The path says t_seed belongs to tester@example.com, so filing there with
+// someone else's email must fail even though the caller is signed in.
+test("tester CANNOT file feedback under another identity", async () => {
+  await assertFails(
+    setDoc(
+      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f4"),
+      validFeedback({ email: "victim@example.com" }),
+    ),
+  );
+});
+
+test("tester CANNOT file feedback on another tester's record", async () => {
+  await assertFails(
+    setDoc(
+      doc(asUser("u2", "tester@example.com"), "testers", "t_other", "feedback", "f5"),
+      validFeedback({ testerId: "t_other" }),
+    ),
+  );
+});
+
+test("feedback status cannot be self-assigned to shipped", async () => {
+  await assertFails(
+    setDoc(
+      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f6"),
+      validFeedback({ status: "shipped" }),
+    ),
+  );
+});
+
+test("feedback cannot carry extra fields", async () => {
+  await assertFails(
+    setDoc(
+      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f7"),
+      validFeedback({ testerNumber: 1, escalated: true }),
+    ),
+  );
+});
+
+test("tester CANNOT edit or delete feedback after filing it", async () => {
+  const db = asUser("u2", "tester@example.com");
+  await assertFails(updateDoc(doc(db, "testers", "t_seed", "feedback", "f1"), { title: "changed" }));
+  await assertFails(deleteDoc(doc(db, "testers", "t_seed", "feedback", "f1")));
+});
+
+test("tester CAN read their own feedback but not another's", async () => {
+  const db = asUser("u2", "tester@example.com");
+  await assertSucceeds(getDocs(collection(db, "testers", "t_seed", "feedback")));
+  await assertFails(getDocs(collection(db, "testers", "t_other", "feedback")));
+});
+
+test("admin CAN read all feedback", async () => {
+  await assertSucceeds(getDocs(collection(asAdmin(), "testers", "t_seed", "feedback")));
+});
+
+/* ------------------------------------------------------------- tester index */
+
+test("anonymous can read a tester index pointer but not enumerate it", async () => {
+  await assertSucceeds(getDoc(doc(anon(), "testerIndex", "hash-abc")));
+  await assertFails(getDocs(collection(anon(), "testerIndex")));
+});
+
+test("nobody can write the tester index from a client", async () => {
+  await assertFails(setDoc(doc(anon(), "testerIndex", "forged"), { testerId: "t_seed" }));
+  await assertFails(setDoc(doc(asAdmin(), "testerIndex", "forged"), { testerId: "t_seed" }));
+});
+
+/* --------------------------------------------------------- CRP Focus accounts */
+
+test("a user CAN create their own account document", async () => {
+  await assertSucceeds(
+    setDoc(doc(asUser("u7", "owner@example.com"), "users", "u7"), {
+      displayName: "owner",
+      email: "owner@example.com",
+      createdAt: serverTimestamp(),
+      uid: "u7",
+    }),
+  );
+});
+
+test("a user CANNOT create an account document for someone else", async () => {
+  await assertFails(
+    setDoc(doc(asUser("u7", "owner@example.com"), "users", "victim"), {
+      displayName: "victim",
+      email: "victim@example.com",
+      createdAt: serverTimestamp(),
+      uid: "victim",
+    }),
+  );
+});
+
+test("a user CAN read their own account but not another's", async () => {
+  await assertSucceeds(getDoc(doc(asUser("u7", "owner@example.com"), "users", "u7")));
+  await assertFails(getDoc(doc(asUser("u7", "owner@example.com"), "users", "victim")));
+});
+
+// The update rule lets the owner change displayName but pins the identity fields,
+// so a live session cannot repoint the record at another address.
+test("a user CANNOT change the email on their account", async () => {
+  await assertFails(
+    updateDoc(doc(asUser("u7", "owner@example.com"), "users", "u7"), {
+      email: "attacker@example.com",
+    }),
+  );
+});
+
+test("a user CAN rename their own account", async () => {
+  await assertSucceeds(
+    updateDoc(doc(asUser("u7", "owner@example.com"), "users", "u7"), {
+      displayName: "renamed",
+    }),
+  );
+});
+
 /* ------------------------------------------------- default deny for strays */
 
 test("unknown collections are denied by default", async () => {
