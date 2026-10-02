@@ -15,18 +15,25 @@ import { STATUS } from "../src/tester-lifecycle.js";
 const EMAIL = "alex@example.com";
 
 /**
- * In-memory store seeded the way the real one will be: a tester document plus the
- * testerIndex pointer the Worker maintains on acceptance.
+ * In-memory store seeded the way the real one is: a user document carrying a
+ * `tester` map, plus the testerIndex pointer the Worker maintains on acceptance.
+ *
+ * The pointer holds a `userId`, because that is the document id of the account
+ * that owns the tester record.
  */
-async function storeWith(tester, { index = true, pointerId = "t_1", indexEmail } = {}) {
+async function storeWith(tester, { index = true, userId = "uid_1", indexEmail } = {}) {
   const docs = new Map();
-  if (tester) docs.set(`testers/${pointerId}`, tester);
+  if (tester) {
+    docs.set(`users/${userId}`, {
+      email: tester.email,
+      displayName: tester.name,
+      tester: { id: "t_1", userId, ...tester },
+    });
+  }
   // `indexEmail` seeds the pointer from a different address than the stored
   // tester, which is how the "index points at the wrong person" case is built.
   if (tester && index) {
-    docs.set(`testerIndex/${await hashEmail(indexEmail || tester.email)}`, {
-      testerId: pointerId,
-    });
+    docs.set(`testerIndex/${await hashEmail(indexEmail || tester.email)}`, { userId });
   }
 
   return {
@@ -91,12 +98,34 @@ describe("roster lookup", () => {
     await expect(findTesterByEmail(store, EMAIL)).rejects.toThrow(PortalError);
   });
 
-  it("reports a dangling index rather than pretending the email is unknown", async () => {
+  it("returns null when the pointer names an account with no tester record", async () => {
+    // A pointer can outlive the membership it named — the account is still there,
+    // but the `tester` map is gone. That is a removed tester, not a broken index,
+    // so it reads the same as "not on the roster" rather than raising.
     const store = await storeWith(tester(), { index: false });
     const key = `testerIndex/${await hashEmail(EMAIL)}`;
-    store.docs.set(key, { testerId: "t_deleted" });
+    store.docs.set(key, { userId: "uid_removed" });
 
-    await expect(findTesterByEmail(store, EMAIL)).rejects.toThrow(/missing/i);
+    expect(await findTesterByEmail(store, EMAIL)).toBeNull();
+  });
+
+  it("refuses a pre-migration pointer that still names a tester document", async () => {
+    // A pointer written before the move to user documents carries `testerId`.
+    // There is no such collection any more, so it cannot be resolved to anyone and
+    // must not be guessed at — a wrong guess hands one tester another's record.
+    const store = await storeWith(tester(), { index: false });
+    const key = `testerIndex/${await hashEmail(EMAIL)}`;
+    store.docs.set(key, { testerId: "t_1" });
+
+    await expect(findTesterByEmail(store, EMAIL)).rejects.toThrow(/migrating/i);
+  });
+
+  it("resolves the uid as well as the tester id", async () => {
+    // The uid is what feedback is written under and what the routes address.
+    const store = await storeWith(tester());
+    const found = await findTesterByEmail(store, EMAIL);
+    expect(found.userId).toBe("uid_1");
+    expect(found.id).toBe("t_1");
   });
 });
 

@@ -113,39 +113,44 @@ async function writeAudit(store, entry) {
 }
 
 /**
- * Point a tester's email at their tester document.
+ * Point a tester's email at the user document that owns their tester map.
  *
- * Without this the tester dashboard cannot find anyone's record:
- * `allow list: if isAdmin()` on `testers` stops a tester querying for their own
- * document, so the dashboard needs a deterministic key to `get` instead. The body
- * holds only the tester id, which is why `testerIndex` can be world-readable.
+ * Without this the tester dashboard cannot find anyone's record: `allow list: if
+ * isAdmin()` on `users` stops a tester querying for their own document, so the
+ * portal needs a deterministic key to `get` instead. The body holds only the uid,
+ * which is why `testerIndex` can be world-readable.
  *
  * Best-effort, deliberately. The tester and their number are already committed by
  * the time this runs; a failure here must not roll back an acceptance or invite a
  * retry that burns a second number. It is repaired by re-approving, and the
  * dashboard's error message points a stuck tester at CRP rather than silently
  * showing an empty account.
+ *
+ * @param {string} userId  The Auth uid, which is also the user document id.
  */
-async function writeTesterIndex(store, { email, testerId }) {
-  if (!email) return false;
+async function writeTesterIndex(store, { email, userId }) {
+  if (!email || !userId) return false;
   try {
     const markerId = await hashEmail(email);
     const existing = await store.getDocument(TESTER_INDEX, markerId);
 
     // Only write when the pointer is absent or wrong. A correct pointer is left
     // alone, so a repeat approval does not generate a pointless write.
-    if (existing && existing.testerId === testerId) return true;
+    if (existing && existing.userId === userId) return true;
 
+    // `testerId` is cleared rather than left stale: a pointer naming a `t_...`
+    // document can no longer be resolved, and keeping it would only be misleading.
+    const payload = { userId, testerId: null, updatedAt: new Date() };
     if (existing) {
-      await store.updateDocument(TESTER_INDEX, markerId, { testerId, updatedAt: new Date() });
+      await store.updateDocument(TESTER_INDEX, markerId, payload);
     } else {
-      await store.createDocument(TESTER_INDEX, markerId, { testerId, createdAt: new Date() });
+      await store.createDocument(TESTER_INDEX, markerId, { ...payload, createdAt: new Date() });
     }
     return true;
   } catch (error) {
     console.error(
       "tester index write failed",
-      JSON.stringify({ testerId, message: error && error.message }),
+      JSON.stringify({ userId, message: error && error.message }),
     );
     return false;
   }
@@ -433,9 +438,11 @@ async function acceptApplication(
     // they are still accepted here, so they are still notified. Their existing
     // number and the existing Wallet object are reused, which is what makes
     // "do not create a second tester" true.
-    const linked = await store.getDocument(TESTERS, canonical);
-    const linkedNumber = typeof linked?.testerNumber === "number" ? linked.testerNumber : null;
-
+    //
+    // The portal pointer is (re)written on every approval, including this one:
+    // a re-application is the natural repair for a pointer that went missing or
+    // still names a pre-migration tester document.
+    await writeTesterIndex(store, { email: request.email, userId: uid });
     const saveUrl = linkedNumber
       ? await issueWalletPass({
           store,
@@ -513,7 +520,15 @@ async function acceptApplication(
   await store.updateDocument(USERS, uid, { tester });
 
   // Status was already claimed atomically above; only the link is new here.
-  await store.updateDocument(REQUESTS, requestId, { testerId });
+  // userId as well as testerId: both are needed to trace a request back to the
+  // account that now owns the tester, which is what the dashboard and the
+  // tester portal navigate by.
+  await store.updateDocument(REQUESTS, requestId, { testerId, userId: uid });
+
+  // Point the portal at this account. Without it the newly accepted tester
+  // cannot sign in and is told they are not on the roster — the tester record is
+  // committed and their number is spent, but the dashboard has no way to find it.
+  await writeTesterIndex(store, { email: request.email, userId: uid });
 
   // Everything the email needs is now durably stored: the tester exists, the
   // number is allocated, and the request is decided. The Wallet pass is
@@ -779,6 +794,10 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
     }
   }
 
+  // Only once the removal has actually committed, so a failed attempt leaves the
+  // pointer in place along with everything else.
+  if (email) await clearTesterIndex(store, { email });
+
   return {
     userId,
     testerId,
@@ -791,6 +810,36 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
     // authoritative record, and a Wallet failure must not undo a removal.
     releasedMarker: Boolean(releaseId),
   };
+}
+
+/**
+ * Drop the portal pointer for a removed tester.
+ *
+ * The `tester` map is already gone by the time this runs, and
+ * findTesterByEmail() refuses to resolve an account without one — so the portal
+ * is locked regardless. This is tidying rather than enforcement: a dangling
+ * pointer would keep pointing at a re-approved tester on a *different* account
+ * later, and is genuinely confusing to read during an incident.
+ *
+ * Best-effort and deliberately outside the removal transaction: a failure here
+ * cannot leave anyone able to submit feedback, because the map is what gates
+ * that, and it must never roll back a completed removal.
+ */
+async function clearTesterIndex(store, { email }) {
+  if (!email) return false;
+  try {
+    await store.updateDocument(TESTER_INDEX, await hashEmail(email), {
+      userId: null,
+      updatedAt: new Date(),
+    });
+    return true;
+  } catch (error) {
+    console.error(
+      "tester index clear failed",
+      JSON.stringify({ message: error && error.message }),
+    );
+    return false;
+  }
 }
 
 /**

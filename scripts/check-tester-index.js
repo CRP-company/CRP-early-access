@@ -1,14 +1,20 @@
 /**
  * Check whether the testerIndex pointers exist for the current roster.
  *
- * Read-only diagnostic. The tester dashboard resolves a signed-in tester through
- * `testerIndex/{sha256(email)}`, which the Worker writes on acceptance. Testers
- * accepted before that existed have no pointer, and cannot log in until an admin
- * re-approves them so the Worker writes one.
+ * Read-only diagnostic. The tester portal resolves a signed-in tester through
+ * `testerIndex/{sha256(email)}`, which the Worker writes on acceptance and points
+ * at the `users/{uid}` document holding their `tester` map.
+ *
+ * Two ways to be stuck:
+ *   - no pointer at all, for an active tester accepted before it existed;
+ *   - a STALE pointer, left over from before the move to user documents, still
+ *     naming a `t_...` tester document that no longer exists.
+ * Either way they cannot sign in until an admin re-approves them, which is what
+ * rewrites the pointer.
  *
  *   node scripts/check-tester-index.js
  *
- * Run after the first deploy to see who still needs re-approving.
+ * Run after the first deploy, and after the testers/ -> users/ migration.
  */
 
 const PROJECT = process.env.CRP_FIRESTORE_PROJECT || "crp-cuby-display";
@@ -46,9 +52,17 @@ function hashEmail(email) {
 
 function decodeFields(fields = {}) {
   const one = (v) => {
+    if (v === null || v === undefined) return undefined;
     if ("stringValue" in v) return v.stringValue;
     if ("integerValue" in v) return Number(v.integerValue);
+    if ("doubleValue" in v) return Number(v.doubleValue);
     if ("booleanValue" in v) return v.booleanValue;
+    if ("nullValue" in v) return null;
+    if ("timestampValue" in v) return v.timestampValue;
+    if ("arrayValue" in v) return (v.arrayValue.values || []).map(one);
+    // Nested maps matter here: `tester` IS a map, so a scalar-only decoder
+    // silently drops every tester and this script reports an empty roster.
+    if ("mapValue" in v) return decodeFields(v.mapValue.fields || {});
     return undefined;
   };
   return Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, one(v)]));
@@ -76,30 +90,49 @@ async function list(token, path) {
 
 (async () => {
   const token = await accessToken();
-  const testers = await list(token, "testers");
+  // The roster is the `users` collection filtered to documents carrying a
+  // `tester` map — there is no standalone `testers` collection any more.
+  const users = (await list(token, "users")).filter((u) => u.tester);
   const pointers = new Map((await list(token, "testerIndex")).map((p) => [p.id, p]));
 
-  console.log(`\ntesterIndex pointers found: ${pointers.size}\n`);
+  console.log(`\ntesterIndex pointers found: ${pointers.size}`);
+  console.log(`testers on user documents: ${users.length}\n`);
   console.log("#".padEnd(4) + "name".padEnd(18) + "email".padEnd(32) + "status".padEnd(12) + "login");
   console.log("-".repeat(84));
 
   let missing = 0;
-  const rows = testers.slice().sort((a, b) => (a.testerNumber ?? 0) - (b.testerNumber ?? 0));
+  let stale = 0;
+  const rows = users
+    .slice()
+    .sort((a, b) => (a.tester.testerNumber ?? 0) - (b.tester.testerNumber ?? 0));
 
-  for (const t of rows) {
-    const key = await hashEmail(t.email);
+  for (const user of rows) {
+    const t = user.tester;
+    const key = await hashEmail(t.email || user.email);
     const pointer = pointers.get(key);
     // A revoked tester has no pointer on purpose, so treat it as expected.
     const expectedAbsent = t.active !== true;
-    const ok = Boolean(pointer) || expectedAbsent;
+    // A pointer left over from before the move names a `t_...` document and can no
+    // longer be resolved, so the portal refuses it. That needs re-approving.
+    const isStale = Boolean(pointer && !pointer.userId);
+    const ok = (Boolean(pointer && pointer.userId) || expectedAbsent) && !isStale;
     if (!ok) missing += 1;
+    if (isStale) stale += 1;
+
+    const login = isStale
+      ? "STALE (pre-migration pointer)"
+      : pointer
+        ? "OK"
+        : expectedAbsent
+          ? "n/a (not active)"
+          : "MISSING";
 
     console.log(
       String(t.testerNumber ?? "-").padEnd(4) +
-        String(t.name || "-").slice(0, 16).padEnd(18) +
-        String(t.email || "-").slice(0, 30).padEnd(32) +
+        String(t.name || user.displayName || "-").slice(0, 16).padEnd(18) +
+        String(t.email || user.email || "-").slice(0, 30).padEnd(32) +
         String(t.status || "-").padEnd(12) +
-        (pointer ? "OK" : expectedAbsent ? "n/a (not active)" : "MISSING"),
+        login,
     );
   }
 

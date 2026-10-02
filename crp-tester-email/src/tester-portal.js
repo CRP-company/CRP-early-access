@@ -10,7 +10,7 @@
 
 import { activeForStatus } from "./tester-lifecycle.js";
 
-const TESTERS = "testers";
+const USERS = "users";
 const TESTER_INDEX = "testerIndex";
 
 /**
@@ -53,36 +53,53 @@ export function currentPeriod(now = new Date()) {
 /**
  * Resolve a signed-in tester's own record from their email.
  *
- * Reads the `testerIndex` pointer first, then the tester document, so this needs
- * exactly two reads and no listing. The index exists purely because
- * `allow list: if isAdmin()` on `testers` means a tester cannot query for their
- * own record.
+ * Reads the `testerIndex` pointer first, then the user document it names, so this
+ * needs exactly two reads and no listing. The index exists purely because
+ * `allow list: if isAdmin()` on `users` means a tester cannot query for their own
+ * record.
  *
- * @returns {Promise<{id: string} & Record<string, any>|null>} null when the email
- *   is not on the roster at all. Throws when the index points at a tester document
- *   that no longer exists, which is a real inconsistency worth surfacing rather
- *   than papering over with a "not found".
+ * The pointer now holds a `userId` — the Auth uid, which is the document id of
+ * the account that owns the `tester` map. A pointer written before the move to
+ * user documents carries `testerId` instead, and is rejected rather than
+ * silently resolved to the wrong person.
+ *
+ * @returns {Promise<{id: string, userId: string} & Record<string, any>|null>}
+ *   `id` is the tester id from inside the map (still used for the Wallet object
+ *   id), `userId` is the account that owns it. null when the email is not on the
+ *   roster at all. Throws when the pointer names an account that no longer has a
+ *   tester record — a real inconsistency worth surfacing rather than papering
+ *   over with a "not found".
  */
 export async function findTesterByEmail(store, email) {
   const pointer = await store.getDocument(TESTER_INDEX, await hashEmail(email));
-  if (!pointer || !pointer.testerId) return null;
+  if (!pointer) return null;
 
-  const tester = await store.getDocument(TESTERS, pointer.testerId);
-  if (!tester) {
+  const userId = pointer.userId;
+  if (!userId) {
+    // A pre-migration pointer that still names a `t_...` tester document. There
+    // is no such collection any more, so this cannot be resolved to anyone.
     throw new PortalError(
       409,
-      "Your tester record is missing. Please contact CRP so we can repair it.",
+      "Your tester record needs migrating. Please contact CRP so we can repair it.",
     );
+  }
+
+  const user = await store.getDocument(USERS, userId);
+  if (!user || !user.tester) {
+    // The account exists but has no tester map: removed from the programme, or
+    // the promotion never completed. Either way there is nothing to act on.
+    return null;
   }
 
   // Defence in depth: the index is keyed by a hash of the email, so a mismatch
   // means the index was built wrong. Never hand back the wrong person's record.
   const want = String(email).trim().toLowerCase();
-  if (typeof tester.email !== "string" || tester.email.trim().toLowerCase() !== want) {
+  const testerEmail = user.tester.email || user.email;
+  if (typeof testerEmail !== "string" || testerEmail.trim().toLowerCase() !== want) {
     throw new PortalError(409, "Your tester record does not match your email. Please contact CRP.");
   }
 
-  return { id: pointer.testerId, ...tester };
+  return { ...user.tester, userId, id: user.tester.id || null };
 }
 
 /**

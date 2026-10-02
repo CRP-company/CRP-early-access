@@ -1,5 +1,5 @@
 /**
- * Security rules tests for the requests/testers split.
+ * Security rules tests for the requests/users split.
  *
  * These run against the real Firestore emulator, so they verify deployed
  * behaviour rather than our reading of the rules file.
@@ -408,20 +408,20 @@ function validFeedback(overrides = {}) {
 
 test("tester CAN file feedback on their own record", async () => {
   await assertSucceeds(
-    setDoc(doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f1"), validFeedback()),
+    setDoc(doc(asUser("u2", "tester@example.com"), "users", "u2", "feedback", "f1"), validFeedback()),
   );
 });
 
 test("anonymous visitor CANNOT file feedback", async () => {
   await assertFails(
-    setDoc(doc(anon(), "testers", "t_seed", "feedback", "f2"), validFeedback()),
+    setDoc(doc(anon(), "users", "u2", "feedback", "f2"), validFeedback()),
   );
 });
 
 test("signed-in non-tester CANNOT file feedback", async () => {
   await assertFails(
     setDoc(
-      doc(asUser("u9", "stranger@example.com"), "testers", "t_seed", "feedback", "f3"),
+      doc(asUser("u9", "stranger@example.com"), "users", "u2", "feedback", "f3"),
       validFeedback({ email: "stranger@example.com" }),
     ),
   );
@@ -432,7 +432,7 @@ test("signed-in non-tester CANNOT file feedback", async () => {
 test("tester CANNOT file feedback under another identity", async () => {
   await assertFails(
     setDoc(
-      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f4"),
+      doc(asUser("u2", "tester@example.com"), "users", "u2", "feedback", "f4"),
       validFeedback({ email: "victim@example.com" }),
     ),
   );
@@ -441,7 +441,7 @@ test("tester CANNOT file feedback under another identity", async () => {
 test("tester CANNOT file feedback on another tester's record", async () => {
   await assertFails(
     setDoc(
-      doc(asUser("u2", "tester@example.com"), "testers", "t_other", "feedback", "f5"),
+      doc(asUser("u2", "tester@example.com"), "users", "u3", "feedback", "f5"),
       validFeedback({ testerId: "t_other" }),
     ),
   );
@@ -450,7 +450,7 @@ test("tester CANNOT file feedback on another tester's record", async () => {
 test("feedback status cannot be self-assigned to shipped", async () => {
   await assertFails(
     setDoc(
-      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f6"),
+      doc(asUser("u2", "tester@example.com"), "users", "u2", "feedback", "f6"),
       validFeedback({ status: "shipped" }),
     ),
   );
@@ -459,7 +459,7 @@ test("feedback status cannot be self-assigned to shipped", async () => {
 test("feedback cannot carry extra fields", async () => {
   await assertFails(
     setDoc(
-      doc(asUser("u2", "tester@example.com"), "testers", "t_seed", "feedback", "f7"),
+      doc(asUser("u2", "tester@example.com"), "users", "u2", "feedback", "f7"),
       validFeedback({ testerNumber: 1, escalated: true }),
     ),
   );
@@ -467,18 +467,18 @@ test("feedback cannot carry extra fields", async () => {
 
 test("tester CANNOT edit or delete feedback after filing it", async () => {
   const db = asUser("u2", "tester@example.com");
-  await assertFails(updateDoc(doc(db, "testers", "t_seed", "feedback", "f1"), { title: "changed" }));
-  await assertFails(deleteDoc(doc(db, "testers", "t_seed", "feedback", "f1")));
+  await assertFails(updateDoc(doc(db, "users", "u2", "feedback", "f1"), { title: "changed" }));
+  await assertFails(deleteDoc(doc(db, "users", "u2", "feedback", "f1")));
 });
 
 test("tester CAN read their own feedback but not another's", async () => {
   const db = asUser("u2", "tester@example.com");
-  await assertSucceeds(getDocs(collection(db, "testers", "t_seed", "feedback")));
-  await assertFails(getDocs(collection(db, "testers", "t_other", "feedback")));
+  await assertSucceeds(getDocs(collection(db, "users", "u2", "feedback")));
+  await assertFails(getDocs(collection(db, "users", "u3", "feedback")));
 });
 
 test("admin CAN read all feedback", async () => {
-  await assertSucceeds(getDocs(collection(asAdmin(), "testers", "t_seed", "feedback")));
+  await assertSucceeds(getDocs(collection(asAdmin(), "users", "u2", "feedback")));
 });
 
 /* ------------------------------------------------------------- tester index */

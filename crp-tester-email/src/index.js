@@ -52,21 +52,29 @@ const USERS = "users";
  * collection-group query would need a structured Firestore query body, which is a
  * larger change than the problem warrants here.
  *
+ * The roster is the `users` collection filtered to documents that actually carry
+ * a `tester` map — the tester record is a nested map, not a document of its own,
+ * and removal deletes that field, so "no tester map" is exactly "not on the
+ * roster" with no flag left to drift.
+ *
  * Annotates each entry with its tester, because the stored document only carries
- * the owner's id — the dashboard needs a name to show.
+ * the owner's id — the dashboard needs a name and number to show.
  */
 async function listAllFeedback(store) {
-  const roster = await store.listCollection(TESTERS);
+  const users = await store.listCollection(USERS);
   const collected = [];
 
-  for (const tester of roster) {
-    if (tester.removed) continue;
-    const entries = await store.listSubcollection(`${TESTERS}/${tester.id}`, "feedback");
+  for (const user of users) {
+    const tester = user.tester;
+    if (!tester) continue;
+
+    const entries = await store.listSubcollection(`${USERS}/${user.id}`, "feedback");
     for (const entry of entries) {
       collected.push({
         ...entry,
-        testerId: tester.id,
-        testerName: tester.name || tester.email || tester.id,
+        userId: user.id,
+        testerId: tester.id || null,
+        testerName: tester.name || user.displayName || user.email || user.id,
         testerNumber:
           typeof tester.testerNumber === "number" ? tester.testerNumber : null,
       });
@@ -218,7 +226,12 @@ async function handleTester(request, env, body, route, origin) {
   // /tester-me: everything the dashboard needs on load, in one call.
   if (route === "/tester-me") {
     const permission = canSubmitFeedback(tester);
-    const history = await store.listSubcollection(`${TESTERS}/${tester.id}/feedback`);
+    // Feedback hangs off the user document, not the tester id, because `tester` is
+    // a map on `users/{uid}` and has no path of its own.
+    const history = await store.listSubcollection(
+      `${USERS}/${tester.userId}`,
+      "feedback",
+    );
     const period = currentPeriod();
     const thisMonth = history.filter((f) => f.period === period).length;
 
@@ -275,7 +288,11 @@ async function handleTester(request, env, body, route, origin) {
     // submission by guessing its document id.
     const feedbackId = crypto.randomUUID();
 
-    await store.createDocument(`${TESTERS}/${tester.id}/feedback`, feedbackId, doc);
+    await store.createDocument(
+      `${USERS}/${tester.userId}/feedback`,
+      feedbackId,
+      doc,
+    );
 
     return json(201, { ok: true, id: feedbackId, period: doc.period }, origin);
   }

@@ -303,6 +303,89 @@ export function createFirestore(secretJson, projectId) {
   }
 
   /**
+   * List a subcollection, e.g. `users/uid/feedback`.
+   *
+   * A thin wrapper over listCollection, which already accepts a slash-separated
+   * document path — Firestore's REST API addresses a subcollection exactly like
+   * a document, by path segment. This exists so callers say what they mean
+   * ("the feedback under this tester") instead of concatenating strings at the
+   * call site and hoping the parent id has no slashes in it.
+   *
+   * @param {string} parentPath  e.g. `users/uid_1`.
+   * @param {string} name        e.g. `feedback`.
+   * @returns {Promise<Array<{id: string} & Record<string, any>>>}
+   */
+  async function listSubcollection(parentPath, name) {
+    return listCollection(`${String(parentPath).replace(/^\/+|\/+$/g, "")}/${name}`);
+  }
+
+  /**
+   * Merge a patch into the `tester` MAP nested inside a user document.
+   *
+   * `tester` is a map field on `users/{uid}`, not a subcollection, so every
+   * lifecycle write targets a dotted path like `tester.active` rather than a
+   * document of its own. That is what keeps a wallet reissue or a deactivation
+   * from having to re-send the whole record — and, more importantly, from
+   * clobbering the sibling fields on the user document (`friends`, `lastLogin`,
+   * `friendRequests`) that the main app owns.
+   *
+   * The mask path is dotted (`tester.wallet`) but the request BODY must be
+   * genuinely nested (`{tester: {wallet: ...}}`). Writing `{"tester.wallet": …}`
+   * instead looks equivalent and is not: Firestore would store a top-level
+   * field whose literal name contains a dot, the mask would find nothing to
+   * update, and the write would silently do nothing.
+   *
+   * @param {string} collection
+   * @param {string} id
+   * @param {object} patch              Fields relative to the `tester` map.
+   * @param {{updateTime?: string}} [options]
+   */
+  async function patchTester(collection, id, patch, options = {}) {
+    const body = {};
+    const maskPaths = [];
+    for (const [key, value] of Object.entries(patch)) {
+      body.tester = { ...(body.tester || {}), [key]: value };
+      maskPaths.push(`tester.${key}`);
+    }
+    return patchNested(collection, id, body, maskPaths, options);
+  }
+
+  /**
+   * Update specific field paths on a document.
+   *
+   * @param {string[]} maskPaths  Dotted field paths, e.g. `tester.wallet`.
+   */
+  async function patchNested(collection, id, body, maskPaths, options = {}) {
+    const url = pathUrl(`${collection}/${id}`);
+    if (options.updateTime) {
+      url.searchParams.set("currentDocument.updateTime", options.updateTime);
+    } else {
+      url.searchParams.set("currentDocument.exists", "true");
+    }
+    // One parameter PER FIELD. A comma-joined single value also works, but the
+    // per-field form is what updateDocument already uses, so keeping them
+    // identical avoids a second shape to reason about.
+    for (const field of maskPaths) {
+      url.searchParams.append("updateMask.fieldPaths", field);
+    }
+
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: await authHeaders(),
+      body: JSON.stringify({ fields: encodeFields(body) }),
+    });
+
+    if (!res.ok) {
+      const err = new Error(
+        `update ${collection}/${id} failed (${res.status}): ${await res.text()}`,
+      );
+      err.status = res.status;
+      throw err;
+    }
+    return true;
+  }
+
+  /**
    * Atomically archive a tester and release their dedupe marker.
    *
    * These two writes MUST land together. A partial remove is the one genuinely
@@ -379,6 +462,116 @@ export function createFirestore(secretJson, projectId) {
 
     await commit(transaction, writes);
     return { removed: true };
+  }
+
+  /**
+   * Archive a tester by pushing it onto the user's `testerHistory` array.
+   *
+   * The old model kept a `removed` flag on a standalone `testers/{id}` document
+   * and hid it in the UI. That does not work here: `tester` is a field on a user
+   * document, and a `removed` flag left in place would mean a removed tester
+   * still reads as "present" to any other part of the app that inspects
+   * `user.tester`. So removal MOVES the record: the snapshot goes onto
+   * `testerHistory` and the `tester` field itself is deleted, which makes
+   * "is this person in the programme" a single field-existence check.
+   *
+   * Atomicity is the same requirement as the old archive, and for the same
+   * reason: the history entry and the marker release must land together. If the
+   * history push succeeded but the `requestEmails` marker survived, the person
+   * would be off the roster yet permanently blocked from re-applying. So all
+   * three writes go in one transaction.
+   *
+   * The read of `testerHistory` happens inside the transaction on purpose. It is
+   * a read-modify-write on an array, so it has to be inside for the retry to be
+   * correct — reading it outside and appending would let a concurrent write
+   * silently drop an earlier history entry.
+   *
+   * @param {object} args
+   * @param {string} args.collection         The `users` collection.
+   * @param {string} args.id                  The user document id (Auth uid).
+   * @param {object} args.archived            The tester snapshot to push.
+   * @param {object} args.auditCollection
+   * @param {string} args.auditId             Deterministic, so a retry cannot
+   *                                           append a second history entry.
+   * @param {object} args.auditEntry
+   * @param {string|null} [args.releaseCollection]
+   * @param {string|null} [args.releaseId]
+   * @param {string} [args.updateTime]        Version precondition for the user.
+   * @returns {Promise<{removed: boolean, alreadyRemoved: boolean}>}
+   */
+  async function removeTesterToHistory({
+    collection,
+    id,
+    archived,
+    auditCollection,
+    auditId,
+    auditEntry,
+    releaseCollection = null,
+    releaseId = null,
+    updateTime,
+  }) {
+    const transaction = await beginTransaction();
+    try {
+      const user = await getDocument(collection, id, { transaction });
+      if (!user) {
+        const error = new Error(`No such user ${collection}/${id}.`);
+        error.status = 404;
+        throw error;
+      }
+
+      // Version precondition. The user document is shared with the main app,
+      // which writes `lastLogin` on every sign-in, so a document that moved
+      // between our read and this commit is expected rather than exotic — but it
+      // still has to fail rather than archive a stale snapshot over the top.
+      if (updateTime && updateTime !== user.updateTime) {
+        const error = new Error("The user changed while removing.");
+        error.status = 409;
+        throw error;
+      }
+
+      // The `tester` field is already gone, so this tester is gone. Re-pushing
+      // would duplicate a history entry, which is exactly what the deterministic
+      // audit id below exists to prevent.
+      if (!user.tester) {
+        await rollback(transaction);
+        return { removed: true, alreadyRemoved: true };
+      }
+
+      const history = Array.isArray(user.testerHistory) ? user.testerHistory : [];
+
+      const writes = [
+        {
+          update: {
+            name: docPath(collection, id),
+            // `tester: null` is the delete. Firestore has no "delete field"
+            // verb, but a nullValue inside an updateMask removes the field, so
+            // listing "tester" in the mask and sending an explicit null is how
+            // the map is dropped. Sibling fields (friends, lastLogin, ...) are
+            // untouched because the mask is explicit.
+            fields: encodeFields({ tester: null, testerHistory: [...history, archived] }),
+          },
+          updateMask: { fieldPaths: ["tester", "testerHistory"] },
+        },
+        {
+          // Create-if-absent, so a retry cannot append a second audit entry.
+          update: {
+            name: docPath(auditCollection, auditId),
+            fields: encodeFields(auditEntry),
+          },
+          currentDocument: { exists: false },
+        },
+      ];
+
+      if (releaseCollection && releaseId) {
+        writes.push({ delete: docPath(releaseCollection, releaseId) });
+      }
+
+      await commit(transaction, writes);
+      return { removed: true, alreadyRemoved: false };
+    } catch (error) {
+      await rollback(transaction);
+      throw error;
+    }
   }
 
   /**
@@ -459,6 +652,7 @@ export function createFirestore(secretJson, projectId) {
     getDocument,
     createDocument,
     updateDocument,
+    patchTester,
     listCollection,
     listSubcollection,
     beginTransaction,

@@ -13,7 +13,11 @@
 
 const PROJECT = process.env.CRP_FIRESTORE_PROJECT || "crp-cuby-display";
 const DATABASE = "(default)";
-const COLLECTION = "testers";
+
+// The roster lives on the user documents, not in a collection of its own: a
+// tester is a `users/{uid}` document that also carries a `tester` map. This
+// script reads `users` and flattens that map, so the output is unchanged.
+const COLLECTION = "users";
 
 /**
  * Mint an OAuth access token from the Firebase CLI's existing login.
@@ -108,7 +112,12 @@ function toCsv(rows) {
 
 (async () => {
   const token = await accessToken();
-  const rows = await listAll(token);
+  // The roster is the `users` collection filtered to documents carrying a
+  // `tester` map. Flattening the map here keeps the table and CSV unchanged, so
+  // this reads the same as before the move.
+  const rows = (await listAll(token))
+    .filter((u) => u.tester)
+    .map((u) => ({ ...u.tester, userId: u.id }));
 
   if (process.argv.includes("--csv")) {
     process.stdout.write(toCsv(rows) + "\n");

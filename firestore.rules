@@ -26,12 +26,67 @@ service cloud.firestore {
         && request.auth.token.admin == true;
     }
 
-    // A signed-in tester may read exactly their own record. Matching on the
-    // verified token email means they cannot widen this to other testers.
-    function isSelf(email) {
-      return request.auth != null
-        && request.auth.token.email != null
-        && request.auth.token.email == email;
+    // NOTE: there is deliberately no `isSelf(email)` helper. Matching a document
+    // against `request.auth.token.email` is weaker than matching the uid, because
+    // an email is a mutable profile field while a uid is issued by Firebase. Every
+    // owner check here uses isSelfUser(userId) instead.
+
+    // The signed-in user IS this document's owner.
+    //
+    // A Firebase document id is the Auth uid, and the uid comes from the verified
+    // token — a client cannot present someone else's. This is a stronger check
+    // than comparing emails: an email is a mutable profile field, so two accounts
+    // could in principle claim the same address, whereas the uid is issued by
+    // Firebase and cannot be forged.
+    function isSelfUser(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Does the caller own the tester program membership on this account?
+    //
+    // Used by the feedback rules, which nest under `users/{uid}` because the
+    // tester record is a map on the user document and has no path of its own.
+    // Requiring the `tester` map to actually exist is what makes a removed
+    // tester lose write access here: removal deletes the field.
+    function ownsTester(userId) {
+      return isSelfUser(userId)
+        && get(/databases/$(database)/documents/users/$(userId)).data.tester is map;
+    }
+
+    // Every field a tester is allowed to submit as feedback. Anything else fails
+    // hasOnly() and the write is rejected outright — so a client cannot smuggle
+    // in a status, a testerId, or a forged timestamp.
+    //
+    // Mirrors validateFeedback() in tester-portal.js, which exists so the tester
+    // sees a message about the specific field rather than a bare denial.
+    function validNewFeedback(data) {
+      return data.keys().hasOnly([
+          'testerId',
+          'email',
+          'title',
+          'body',
+          'area',
+          'status',
+          'period',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.title is string
+        && data.title.size() >= 3
+        && data.title.size() <= 120
+        && data.body is string
+        && data.body.size() >= 10
+        && data.body.size() <= 2000
+        && data.area in ['app', 'product', 'hardware', 'other']
+        && data.email is string
+        && data.email.size() <= 254
+        // Status is staff triage state. A tester filing "shipped" would be
+        // asserting that their own request was acted on.
+        && data.status == 'submitted'
+        // The month is stamped by the Worker so "did they hit the target" does
+        // not depend on inferring a month from a timestamp and a timezone.
+        && data.period.matches('^[0-9]{4}-[0-9]{2}$')
+        && data.createdAt == request.time;
     }
 
     // Every field the public form is allowed to submit. Anything else in the
@@ -141,7 +196,14 @@ service cloud.firestore {
       allow list: if isAdmin();
 
       // Only a self-service create, and never one that sneaks in a tester map.
+      // The allowlist is the CRP Focus app's sign-up shape, so a create cannot
+      // be used to plant arbitrary fields. `tester`/`testerHistory` are named
+      // explicitly as well: hasOnly() already excludes them, but "a user can
+      // never create themselves as a tester" is the intent worth stating.
       allow create: if isSelfUser(userId)
+        && request.resource.data.keys().hasOnly(
+             ['displayName', 'email', 'createdAt', 'uid',
+              'friends', 'friendRequests', 'lastLogin'])
         && !request.resource.data.keys().hasAny(['tester', 'testerHistory']);
 
       // Self-service update, restricted to the fields this app owns. Staff
@@ -156,44 +218,24 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // A tester's own account document, written by the CRP Focus app on sign-up.
-    //
-    // Scoped to the owner so one user cannot read or rewrite another's account.
-    // `get` rather than `list`: the app only ever addresses its own document by
-    // id, and a `list` grant here would be a lie — Firestore evaluates the rule
-    // per document, so a collection query would still be refused for every row
-    // that is not the caller's.
-    match /users/{userId} {
-      allow get: if isAdmin() || (request.auth != null && request.auth.uid == userId);
-      allow create: if request.auth != null
-        && request.auth.uid == userId
-        && request.resource.data.keys().hasOnly(['displayName', 'email', 'createdAt', 'uid']);
-      // Update is allowed to the owner but cannot change identity: `email` and
-      // `uid` must match what was there before, so a session cannot be used to
-      // repoint an account at another address. displayName stays editable, which
-      // is the only field the app ever changes after sign-up.
-      allow update: if request.auth != null
-        && request.auth.uid == userId
-        && request.resource.data.email == resource.data.email
-        && request.resource.data.uid == resource.data.uid;
-      allow delete: if isAdmin();
-    }
-
     // ------------------------------------------------------- tester feedback
     // What testers ask for: one document per submission, owned by its tester.
     //
-    // Nested under the tester rather than in a top-level collection, because the
-    // path itself carries the ownership check — `ownsTester()` below can confirm
-    // the caller owns `testerId` without trusting anything in the request body. A
-    // flat collection would have to trust a self-declared testerId field, which
-    // is exactly the thing a client controls.
-    match /testers/{testerId}/feedback/{feedbackId} {
-      allow create: if ownsTester(testerId)
+    // Nested under the USER document rather than a top-level collection, because
+    // the path itself carries the ownership check — `ownsTester()` can confirm
+    // the caller owns this account's tester membership without trusting anything
+    // in the request body. A flat collection would have to trust a self-declared
+    // testerId field, which is exactly the thing a client controls.
+    //
+    // It nests under `users/{uid}` rather than `users/{uid}/tester/...` because
+    // `tester` is a map field, not a document: it has no path of its own.
+    match /users/{userId}/feedback/{feedbackId} {
+      allow create: if ownsTester(userId)
         && validNewFeedback(request.resource.data)
         // The author and the owner must be the same verified address, so a
-        // tester cannot file feedback under someone else's number.
+        // tester cannot file feedback under someone else's account.
         && request.resource.data.email == request.auth.token.email;
-      allow read: if isAdmin() || ownsTester(testerId);
+      allow read: if isAdmin() || ownsTester(userId);
       // No update or delete from a client: feedback is part of the program's
       // record of what was asked for, so a tester cannot edit a submission after
       // the fact. Staff triage goes through the Worker, which re-checks the claim.

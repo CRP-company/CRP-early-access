@@ -21,10 +21,49 @@ users/{authUid}             the account; doc id IS the Firebase Auth uid
   tester        { ... }     <-- the tester record, a nested MAP
   testerHistory [ { ... } ] <-- past tenures, appended on removal
 
+users/{authUid}/feedback/{feedbackId}   what that tester asked for
+  title, body, area, status, period
+  testerId, email, createdAt, updatedAt
+
+testerIndex/{sha256(email)}  email -> userId pointer, so a tester can find
+                             their own record without being able to list
 requestEmails/{sha256(email)}           pending/approved/inactive duplicate marker
 meta/testerCounter                      sequential tester-number counter
 audit/{entryId}                         append-only trail of staff actions
 ```
+
+### How a tester signs in
+
+`testerIndex/{sha256(email)}` holds only a `userId`, so it is safe to read
+openly while `list` stays denied — the key is a hash, so it leaks nothing, and it
+cannot be enumerated. The portal resolves a signed-in tester's own record through
+it in two reads, never accepting a caller-supplied tester id.
+
+The Worker writes this pointer on every approval. Two things can leave a tester
+unable to sign in: no pointer at all, or a **stale** one left from before the move
+to user documents that still names a `t_...` document. Both are repaired either by
+re-approving or by the backfill:
+
+```
+node scripts/check-tester-index.js              # who is stuck
+node scripts/backfill-tester-index.js            # dry run
+node scripts/backfill-tester-index.js --apply    # write the pointers
+```
+
+The backfill only ever fills gaps — a correct pointer is left alone — and touches
+nothing but `testerIndex`.
+
+### Feedback
+
+Tester requests live at `users/{uid}/feedback/{id}` — under the user document
+rather than under `tester`, because `tester` is a map and has no path of its own.
+The path carries the ownership check: a tester can only write beneath their own
+account, and only while they still hold a `tester` map, so removal revokes
+feedback access without touching a rule.
+
+`status` is fixed to `submitted` by the rules. A tester cannot mark their own
+request as shipped, and cannot edit or delete a submission afterwards — the
+programme's record of what was asked for is staff-owned.
 
 The `tester` map:
 
