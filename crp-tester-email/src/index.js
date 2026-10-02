@@ -39,7 +39,7 @@ import {
 import { buildSaveUrl, accountIdFor, ISSUER_ID } from "./wallet.js";
 import { activeForStatus } from "./tester-lifecycle.js";
 
-const TESTERS = "testers";
+const USERS = "users";
 
 // ---------------------------------------------------------------- feedback
 
@@ -342,7 +342,7 @@ async function handleAdmin(request, env, body, route, origin) {
   }
 
   if (route === "/accept") {
-    const { requestId, decision, note } = body || {};
+    const { requestId, decision, note, password } = body || {};
     if (!requestId || typeof requestId !== "string") {
       return json(400, { ok: false, error: "requestId is required." }, origin);
     }
@@ -352,8 +352,13 @@ async function handleAdmin(request, env, body, route, origin) {
       note,
       actorUid: admin.uid,
       actorEmail: admin.email,
-      // env is needed server-side to sign the Wallet pass and to send the
-      // decision email. Secrets are read here and never reach the browser.
+      // Only consulted when approving someone with no Firebase account yet, since
+      // their tester record is written to `users/{uid}` and that account has to
+      // exist first. Never echoed back.
+      password,
+      // env is needed server-side to sign the Wallet pass, to create the Auth
+      // account and to send the decision email. Secrets are read here and never
+      // reach the browser.
       env,
     });
     return json(200, { ok: true, ...result }, origin);
@@ -366,9 +371,9 @@ async function handleAdmin(request, env, body, route, origin) {
   // protection, so a confirmation has to be deliberate. It stays behind the same
   // requireAdmin() check as every other admin route.
   if (route === "/tester-remove") {
-    const { testerId, reason } = body || {};
+    const { userId, reason } = body || {};
     const result = await removeTester(store, {
-      testerId,
+      userId,
       reason,
       actorUid: admin.uid,
       actorEmail: admin.email,
@@ -384,7 +389,7 @@ async function handleAdmin(request, env, body, route, origin) {
     if (result.removed && !result.alreadyRemoved) {
       try {
         saveUrl = await buildSaveUrl({
-          tester: { id: testerId },
+          tester: { id: result.testerId },
           active: false,
           testerNumber: result.testerNumber,
           secretJson: env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON,
@@ -393,7 +398,7 @@ async function handleAdmin(request, env, body, route, origin) {
       } catch (error) {
         console.error(
           "wallet revoke after removal failed",
-          JSON.stringify({ testerId, message: error && error.message }),
+          JSON.stringify({ userId, testerId: result.testerId, message: error && error.message }),
         );
       }
     }
@@ -414,16 +419,23 @@ async function handleAdmin(request, env, body, route, origin) {
   // there is still exactly one Wallet implementation and no client can reach it
   // without the admin claim.
   if (route === "/tester-wallet") {
-    const { testerId } = body || {};
-    if (!testerId || typeof testerId !== "string") {
-      return json(400, { ok: false, error: "testerId is required." }, origin);
+    const { userId } = body || {};
+    if (!userId || typeof userId !== "string") {
+      return json(400, { ok: false, error: "userId is required." }, origin);
     }
 
-    const tester = await store.getDocument(TESTERS, testerId);
-    if (!tester) return json(404, { ok: false, error: "No such tester." }, origin);
+    const user = await store.getDocument(USERS, userId);
+    // A user with no `tester` map has been removed from the programme, so there
+    // is no card to reissue.
+    const tester = user?.tester;
+    if (!tester) return json(404, { ok: false, error: "This user is not a tester." }, origin);
 
-    // The object id is derived from the tester document id, so this updates the
-    // card the applicant already holds rather than minting a second object.
+    const testerId = tester.id;
+
+    // The object id is derived from the tester id stored inside the map, so this
+    // updates the card the applicant already holds rather than minting a second
+    // object. The id is unchanged by the move to `users/{uid}`, so cards issued
+    // before the restructure keep working.
     const saveUrl = await buildSaveUrl({
       tester: { id: testerId, name: tester.name },
       // Pass state follows `active`, so a revoked tester gets a REVOKED card.
@@ -433,7 +445,8 @@ async function handleAdmin(request, env, body, route, origin) {
       secretJson: env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON,
     });
 
-    await store.updateDocument(TESTERS, testerId, {
+    // Masked to tester.wallet, so the user's other fields are untouched.
+    await store.patchTester(USERS, userId, {
       wallet: {
         issuerId: ISSUER_ID,
         classId: `${ISSUER_ID}.crp_tester_loyalty`,
@@ -444,18 +457,24 @@ async function handleAdmin(request, env, body, route, origin) {
 
     return json(
       200,
-      { ok: true, saveUrl, active: activeForStatus(tester.status) },
+      {
+        ok: true,
+        saveUrl,
+        userId,
+        testerId,
+        active: activeForStatus(tester.status),
+      },
       origin,
     );
   }
 
   // /tester-status
-  const { testerId, status, active, reason } = body || {};
-  if (!testerId || typeof testerId !== "string") {
-    return json(400, { ok: false, error: "testerId is required." }, origin);
+  const { userId, status, active, reason } = body || {};
+  if (!userId || typeof userId !== "string") {
+    return json(400, { ok: false, error: "userId is required." }, origin);
   }
   const result = await setTesterStatus(store, {
-    testerId,
+    userId,
     status,
     active,
     reason,

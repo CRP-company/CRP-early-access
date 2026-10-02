@@ -77,13 +77,25 @@ export async function postToWorker({ url, token, body, fetchImpl = fetch }) {
  * @param {string} options.requestId
  * @param {"approved"|"rejected"} options.decision
  * @param {string} [options.note]
+ * @param {string} [options.password]  Sent only on approval. The tester record
+ *   lives on `users/{uid}`, so approving someone with no CRP account yet has to
+ *   create one, and that needs a password. Ignored for a rejection, and ignored
+ *   by the Worker when the account already exists. Never stored or echoed back.
  * @param {typeof fetch} [options.fetchImpl]
  */
-export function decideViaWorker({ url, token, requestId, decision, note = "", fetchImpl }) {
+export function decideViaWorker({
+  url,
+  token,
+  requestId,
+  decision,
+  note = "",
+  password = null,
+  fetchImpl,
+}) {
   return postToWorker({
     url,
     token,
-    body: { requestId, decision, note },
+    body: { requestId, decision, note, password },
     fetchImpl,
   });
 }

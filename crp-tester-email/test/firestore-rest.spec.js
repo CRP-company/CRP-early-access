@@ -107,7 +107,7 @@ describe("createDocument is unchanged", () => {
   it("still uses the exists=false precondition for atomic create", async () => {
     stub();
     const store = createFirestore(SECRET, "crp-cuby-display");
-    await store.createDocument("testers", "t_1", { email: "a@example.com" });
+    await store.createDocument("users", "uid_1", { email: "a@example.com" });
 
     const url = new URL(calls[0].url);
     expect(url.searchParams.get("currentDocument.exists")).toBe("false");

@@ -17,8 +17,15 @@ import { buildSaveUrl, accountIdFor } from "./wallet.js";
 import { buildAcceptanceEmail, buildRejectionEmail } from "./decision-emails.js";
 import { sendEmail } from "./resend.js";
 
+import {
+  findUserByEmail,
+  createUser,
+  isEmailAlreadyRegistered,
+  UserAccountError,
+} from "./user-account.js";
+
 const REQUESTS = "requests";
-const TESTERS = "testers";
+const USERS = "users";
 const REQUEST_EMAILS = "requestEmails";
 const TESTER_INDEX = "testerIndex";
 const AUDIT = "audit";
@@ -145,17 +152,91 @@ async function writeTesterIndex(store, { email, testerId }) {
 }
 
 /**
- * Find an existing tester with the same email, ignoring one id.
+ * Read a user document by email, falling back to the Auth account for its uid.
  *
- * Removed testers are skipped. Someone who left the program and applied again
- * must get a genuinely new tester with a new number, not be linked back to
- * their archived record — which would resurrect the old number and make the
- * removal reversible by accident.
+ * The Firestore document is the authority for whether a `tester` map exists.
+ * Auth is the authority for the uid itself. A user can exist in one and not the
+ * other — a half-finished promotion leaves a Firestore doc, and a brand-new
+ * signup leaves only an Auth account — so this checks both and never assumes.
  */
-async function findExistingTester(store, email, excludeId) {
-  const list = await store.listCollection(TESTERS);
-  const match = list.find((t) => t.email === email && t.id !== excludeId && !t.removed);
-  return match ? match.id : null;
+async function findUserDocumentByEmail(store, email) {
+  const list = await store.listCollection(USERS);
+  const match = list.find(
+    (u) => String(u.email || "").trim().toLowerCase() === String(email).trim().toLowerCase(),
+  );
+  return match ? { ...match, id: match.id } : null;
+}
+
+/**
+ * Resolve (or create) the Firebase Auth account behind an approved applicant.
+ *
+ * The tester's identity is now a Firebase uid, because the tester record lives on
+ * `users/{uid}`. So approval has to end with a real account that the applicant
+ * can sign in with in the app — an account that did not previously exist has to
+ * be created, which is why an approval can now legitimately need a password
+ * from the admin.
+ *
+ * Race handling: two admins approving the same brand-new applicant at once both
+ * see "no account" and both try to create one. Google rejects the loser with
+ * EMAIL_EXISTS, and rather than surfacing a confusing failure we re-resolve by
+ * email and continue. Exactly one uid wins, so a duplicate identity is not
+ * possible.
+ *
+ * @returns {Promise<{uid: string, created: boolean, displayName: string|null}>}
+ */
+async function resolveTesterAccount(env, { email, name, password }) {
+  const sa = env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+  const existing = await findUserByEmail(sa, email);
+  if (existing) {
+    return { uid: existing.uid, created: false, displayName: existing.displayName };
+  }
+
+  // No account yet, so one must be created. Without a password this cannot
+  // proceed, and saying so plainly beats letting Firebase reject it.
+  if (!password) {
+    throw new UserAccountError(
+      400,
+      `${email} has no CRP account yet. Provide a password (min 6 characters) to create one.`,
+    );
+  }
+
+  try {
+    const created = await createUser(sa, { email, password, displayName: name });
+    return { uid: created.uid, created: true, displayName: created.displayName };
+  } catch (error) {
+    if (isEmailAlreadyRegistered(error)) {
+      // Lost the race — the other admin's account is the one to use.
+      const raced = await findUserByEmail(sa, email);
+      if (raced) return { uid: raced.uid, created: false, displayName: raced.displayName };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Ensure a `users/{uid}` document exists for a resolved account.
+ *
+ * The document is created with only the fields this project owns — email,
+ * displayName, createdAt. `friends`, `friendRequests` and `lastLogin` belong to
+ * the main app and are deliberately left absent rather than seeded with empty
+ * values, so creating a tester record can never overwrite or pre-empt them.
+ */
+async function ensureUserDocument(store, { uid, email, displayName, now }) {
+  const existing = await store.getDocument(USERS, uid);
+  if (existing) return { created: false, document: existing };
+
+  await store.createDocument(USERS, uid, {
+    email: String(email).trim().toLowerCase(),
+    displayName: displayName || null,
+    createdAt: now,
+    // An empty array, not an absent field: the app reads this unconditionally
+    // and a missing field is a different (falsy but present) value to query on.
+    friendRequests: [],
+    friends: [],
+  });
+
+  return { created: true, document: null };
 }
 
 /**
@@ -168,8 +249,15 @@ async function findExistingTester(store, email, excludeId) {
  * @param {string} [args.note]
  * @param {string} args.actorUid
  * @param {string} [args.actorEmail]
+ * @param {string} [args.password]  Only used when APPROVING an applicant who has no
+ *   Firebase account yet: the tester record lives on `users/{uid}`, so approving
+ *   them creates the account they will sign in with. Ignored for a rejection and
+ *   ignored when the account already exists.
  */
-export async function decideRequest(store, { requestId, decision, note, actorUid, actorEmail, env }) {
+export async function decideRequest(
+  store,
+  { requestId, decision, note, actorUid, actorEmail, env, password },
+) {
   if (decision !== "approved" && decision !== "rejected") {
     throw new AcceptError(400, "decision must be 'approved' or 'rejected'.");
   }
@@ -285,20 +373,61 @@ export async function decideRequest(store, { requestId, decision, note, actorUid
     now,
     actorUid,
     env,
+    password,
   });
 }
 
 /** The promotion half of an approval. */
-async function acceptApplication(store, { request, requestId, audit, now, actorUid, env }) {
+async function acceptApplication(
+  store,
+  { request, requestId, audit, now, actorUid, env, password },
+) {
   const testerId = `t_${requestId}`;
 
-  // If this email is already a tester under a different id, point the request
-  // at the canonical record rather than creating a second one.
-  const canonical = await findExistingTester(store, request.email, testerId);
-  if (canonical) {
+  // The tester now lives on `users/{uid}`, so approval starts by resolving the
+  // applicant's real Firebase account — creating one if this is their first
+  // acceptance. This happens BEFORE any tester number is allocated, because a
+  // rejected password must not leave a number burned.
+  const account = await resolveTesterAccount(env, {
+    email: request.email,
+    name: request.name,
+    password,
+  });
+  const { uid } = account;
+
+  // Create the user document if the Auth account has never been seen by
+  // Firestore. Existing documents are left exactly as they are.
+  await ensureUserDocument(store, {
+    uid,
+    email: request.email,
+    displayName: account.displayName || request.name,
+    now,
+  });
+
+  // An applicant who is already a tester on this account keeps their existing
+  // number and Wallet object — that is what makes "never create a second
+  // tester" true. Their previous record was a re-application after a removal,
+  // and resurrecting the old number would silently undo the removal.
+  const user = await store.getDocument(USERS, uid);
+  const alreadyTester = Boolean(user?.tester);
+
+  if (alreadyTester) {
+    // The EXISTING record is canonical. Reporting (and auditing) the id derived
+    // from this request instead would be a lie: the request never created a
+    // tester, it linked to one, and the audit trail and the Wallet object id
+    // both have to name the record that actually exists.
+    const linkedId = user.tester.id || testerId;
+    const linkedNumber =
+      typeof user.tester.testerNumber === "number" ? user.tester.testerNumber : null;
+
     // Status was already claimed atomically above; only the link is new here.
-    await store.updateDocument(REQUESTS, requestId, { testerId: canonical });
-    await writeAudit(store, { ...audit, action: "tester.linked", testerId: canonical });
+    await store.updateDocument(REQUESTS, requestId, { testerId: linkedId, userId: uid });
+    await writeAudit(store, {
+      ...audit,
+      action: "tester.linked",
+      testerId: linkedId,
+      userId: uid,
+    });
 
     // The applicant is already on the roster, so no new number is burned — but
     // they are still accepted here, so they are still notified. Their existing
@@ -307,12 +436,15 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
     const linked = await store.getDocument(TESTERS, canonical);
     const linkedNumber = typeof linked?.testerNumber === "number" ? linked.testerNumber : null;
 
-    // The pointer should already exist for a linked tester, but a tester accepted
-    // before the index existed would not have one. Cheap to guarantee here.
-    await writeTesterIndex(store, { email: request.email, testerId: canonical });
-
     const saveUrl = linkedNumber
-      ? await issueWalletPass({ store, env, testerId: canonical, testerNumber: linkedNumber, request })
+      ? await issueWalletPass({
+          store,
+          env,
+          uid,
+          testerId: linkedId,
+          testerNumber: linkedNumber,
+          request,
+        })
       : null;
 
     const emailed = linkedNumber
@@ -326,18 +458,31 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
         })
       : false;
 
-    return { requestId, status: "approved", testerId: canonical, testerNumber: linkedNumber, emailed, saveUrl };
+    return {
+      requestId,
+      status: "approved",
+      testerId: linkedId,
+      userId: uid,
+      testerNumber: linkedNumber,
+      accountCreated: false,
+      emailed,
+      saveUrl,
+    };
   }
 
-  // Re-approving must not burn a number, or the roster would develop gaps.
-  const existing = await store.getDocument(TESTERS, testerId);
-  const testerNumber =
-    existing && typeof existing.testerNumber === "number"
-      ? existing.testerNumber
-      : await allocateTesterNumber(store);
+  // A re-application always takes a FRESH number, even when the same request id
+  // is retried. The old code could recognise `testers/t_<requestId>` and reuse
+  // its number, which is safe only because the id was derived from the request.
+  // Now the id lives on a user document shared across tenures, so "already
+  // approved" is detected by the `tester` map existing — handled above — and a
+  // re-application after removal correctly gets a new number from the counter.
+  // The counter itself is never rewound, so a retired number is never reissued.
+  const testerNumber = await allocateTesterNumber(store);
 
-  const patch = {
+  const tester = {
+    id: testerId,
     requestId,
+    userId: uid,
     name: request.name,
     email: request.email,
     status: STATUS.ACCEPTED,
@@ -345,6 +490,7 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
     statusChangedBy: actorUid || "system",
     appliedAt: request.createdAt || now,
     acceptedAt: now,
+    createdAt: now,
     testerNumber,
     // Derived from status, never set independently.
     active: activeForStatus(STATUS.ACCEPTED),
@@ -352,37 +498,35 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
     deactivatedAt: null,
     deactivatedBy: null,
     deactivationReason: null,
-    activity: existing?.activity || { lastPeriod: null, comments: 0, reviews: 0 },
+    activity: { lastPeriod: null, comments: 0, reviews: 0 },
+    wallet: {
+      issuerId: ISSUER_ID,
+      classId: `${ISSUER_ID}.crp_tester_loyalty`,
+      accountId: accountIdFor(testerId),
+      lastIssuedAt: null,
+    },
     updatedAt: now,
   };
 
-  if (existing) {
-    await store.updateDocument(TESTERS, testerId, patch);
-  } else {
-    await store.createDocument(TESTERS, testerId, {
-      ...patch,
-      wallet: {
-        issuerId: ISSUER_ID,
-        classId: `${ISSUER_ID}.crp_tester_loyalty`,
-        accountId: `CRP-${testerId.slice(2, 10).toUpperCase()}`,
-        lastIssuedAt: null,
-      },
-      createdAt: now,
-    });
-  }
+  // Written as a nested map with an explicit updateMask, so the user's other
+  // fields (friends, friendRequests, lastLogin, displayName) are untouched.
+  await store.updateDocument(USERS, uid, { tester });
 
   // Status was already claimed atomically above; only the link is new here.
   await store.updateDocument(REQUESTS, requestId, { testerId });
-
-  // The dashboard's lookup pointer. Written before the Wallet pass and the email,
-  // so a tester who reads their acceptance email can already sign in.
-  await writeTesterIndex(store, { email: request.email, testerId });
 
   // Everything the email needs is now durably stored: the tester exists, the
   // number is allocated, and the request is decided. The Wallet pass is
   // generated after that point, and the email is sent last, so a failure in
   // either can never leave a number burned with no tester created.
-  const saveUrl = await issueWalletPass({ store, env, testerId, testerNumber, request });
+  const saveUrl = await issueWalletPass({
+    store,
+    env,
+    uid,
+    testerId,
+    testerNumber,
+    request,
+  });
 
   const emailed = await notifyDecision({
     env,
@@ -397,10 +541,22 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
     ...audit,
     action: "tester.created",
     testerId,
+    userId: uid,
     detail: { ...audit.detail, testerNumber },
   });
 
-  return { requestId, status: "approved", testerId, testerNumber, emailed, saveUrl };
+  return {
+    requestId,
+    status: "approved",
+    testerId,
+    userId: uid,
+    testerNumber,
+    // The dashboard needs this: a newly created account has credentials the
+    // applicant has never seen, so the admin must be told to pass them on.
+    accountCreated: account.created,
+    emailed,
+    saveUrl,
+  };
 }
 
 /**
@@ -418,7 +574,7 @@ async function acceptApplication(store, { request, requestId, audit, now, actorU
  * simply omits the button, and the admin can still issue the card by hand from
  * the dashboard.
  */
-async function issueWalletPass({ store, env, testerId, testerNumber, request }) {
+async function issueWalletPass({ store, env, uid, testerId, testerNumber, request }) {
   try {
     const saveUrl = await buildSaveUrl({
       tester: { id: testerId, name: request.name },
@@ -427,7 +583,9 @@ async function issueWalletPass({ store, env, testerId, testerNumber, request }) 
       secretJson: env.GOOGLE_WALLET_SERVICE_ACCOUNT_JSON,
     });
 
-    await store.updateDocument(TESTERS, testerId, {
+    // `tester.wallet` specifically, not the whole `tester` map: the mask is what
+    // stops this touching the user's other fields.
+    await store.patchTester(USERS, uid, {
       wallet: {
         issuerId: ISSUER_ID,
         classId: `${ISSUER_ID}.crp_tester_loyalty`,
@@ -454,32 +612,40 @@ async function issueWalletPass({ store, env, testerId, testerNumber, request }) 
  * reversible, and still blocks them from re-applying. Remove is the exit
  * decision: the person leaves, and is allowed to apply again.
  *
- * What it does, in one Firestore transaction (see store.removeTester):
- *   1. archives the tester — `removed` flag, reason, who and when
- *   2. writes a permanent audit entry with testerId, number, email and actor
- *   3. deletes their requestEmails marker, releasing the duplicate protection
+ * What it does, in one Firestore transaction (see store.removeTesterToHistory):
+ *   1. appends a full snapshot of the tester onto the user's `testerHistory`
+ *   2. deletes the `tester` map, which is what takes them off the roster
+ *   3. writes a permanent audit entry with testerId, number, email and actor
+ *   4. deletes their requestEmails marker, releasing the duplicate protection
+ *
+ * The tester is MOVED rather than flagged. `tester` is a map on the user
+ * document, so a `removed` flag left in place would still read as "in the
+ * programme" to anything that inspects `user.tester` — the app included.
+ * Deleting the field makes membership a plain existence check, and the history
+ * keeps everything the flag would have.
  *
  * What it deliberately preserves:
- *   - the tester document, so name, number, activity history and past audit
- *     entries survive. The document is archived, not deleted.
+ *   - the snapshot on `testerHistory`, so name, number and activity survive.
+ *   - the rest of the user document. Only `tester` and `testerHistory` are in
+ *     the update mask, so `friends`, `friendRequests` and `lastLogin` are
+ *     untouched.
  *   - the sequential counter, so the number is never handed to anyone else.
  *     A re-approved person gets a brand new number.
  *
- * The archived tester is hidden from the active roster by the dashboard's
- * filter, and findExistingTester() skips removed testers, so a later
- * application from the same address creates a genuinely new tester rather than
- * being linked back to this one.
+ * A later application from the same address finds the account already exists
+ * (the Auth account survives removal) and simply gets a new `tester` map with a
+ * new number, leaving the history intact.
  *
  * @param {object} store Firestore handle.
  * @param {object} args
- * @param {string} args.testerId
+ * @param {string} args.userId  The Auth uid whose user document holds `tester`.
  * @param {string} [args.reason]  Required: removal must be explainable.
  * @param {string} [args.actorUid] Admin uid, for the audit entry.
  * @param {string} [args.actorEmail]
  */
-export async function removeTester(store, { testerId, reason, actorUid, actorEmail }) {
-  if (!testerId || typeof testerId !== "string") {
-    throw new AcceptError(400, "testerId is required.");
+export async function removeTester(store, { userId, reason, actorUid, actorEmail }) {
+  if (!userId || typeof userId !== "string") {
+    throw new AcceptError(400, "userId is required.");
   }
 
   const cleanReason = typeof reason === "string" ? reason.trim() : "";
@@ -489,22 +655,26 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
     throw new AcceptError(400, "A reason is required when removing a tester.");
   }
 
-  const tester = await store.getDocument(TESTERS, testerId);
-  if (!tester) throw new AcceptError(404, "No such tester.");
+  const user = await store.getDocument(USERS, userId);
+  if (!user) throw new AcceptError(404, "No such user.");
 
-  // Idempotency: a repeat removal is a no-op, not a second archive and not a
-  // second audit entry. This is the guard that makes the operation safe to retry
-  // after a timeout or a double-click.
-  if (tester.removed) {
+  // Idempotency: a repeat removal is a no-op, not a second history entry and not
+  // a second audit entry. This is the guard that makes the operation safe to
+  // retry after a timeout or a double-click.
+  if (!user.tester) {
+    const prior = Array.isArray(user.testerHistory) ? user.testerHistory.at(-1) : null;
     return {
-      testerId,
+      userId,
+      testerId: prior?.id ?? null,
       removed: true,
       alreadyRemoved: true,
-      testerNumber: tester.testerNumber ?? null,
+      testerNumber: prior?.testerNumber ?? null,
       releasedMarker: false,
     };
   }
 
+  const tester = user.tester;
+  const testerId = tester.id || null;
   const now = new Date();
   const email = tester.email;
 
@@ -517,6 +687,7 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
     action: "tester.removed",
     actor: actorUid || "system",
     actorEmail: actorEmail || null,
+    userId,
     testerId,
     testerNumber: tester.testerNumber ?? null,
     email: email || null,
@@ -527,52 +698,58 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
     walletRevoked: true,
   };
 
-  // Archived, not deleted: the roster, number and history all stay on the
-  // record; only the participation ends.
-  const patch = {
-    removed: true,
-    removedAt: now,
-    removedBy: actorUid || "system",
-    removalReason: String(cleanReason).slice(0, 300),
-    // Leaving the program implies not active. `status` moves to revoked so the
-    // lifecycle vocabulary stays consistent and a reissue yields a REVOKED card.
-    status: STATUS.REVOKED,
-    active: false,
-    statusChangedAt: now,
-    statusChangedBy: actorUid || "system",
-    deactivatedAt: now,
-    deactivatedBy: actorUid || "system",
-    deactivationReason: String(cleanReason).slice(0, 300),
-    updatedAt: now,
-  };
-
+  let result;
   try {
-    await store.removeTester({
-      collection: TESTERS,
-      id: testerId,
-      patch,
-      // Version precondition: if anyone edited this tester between our read and
-      // the commit, the removal fails rather than clobbering their change.
-      updateTime: tester.updateTime,
+    result = await store.removeTesterToHistory({
+      collection: USERS,
+      id: userId,
+      // The full prior record, so nothing is lost — the archived entry answers
+      // "what was this person's number and status when they left".
+      archived: {
+        ...tester,
+        removed: true,
+        // Leaving the program implies not active. `status` moves to revoked so
+        // the lifecycle vocabulary stays consistent and a reissue yields a
+        // REVOKED card.
+        status: STATUS.REVOKED,
+        active: false,
+        removedAt: now,
+        removedBy: actorUid || "system",
+        removalReason: String(cleanReason).slice(0, 300),
+        statusChangedAt: now,
+        statusChangedBy: actorUid || "system",
+        deactivatedAt: now,
+        deactivatedBy: actorUid || "system",
+        deactivationReason: String(cleanReason).slice(0, 300),
+        updatedAt: now,
+      },
       auditCollection: AUDIT,
-      // Deterministic, so the create-if-absent write below fails on a retry
-      // instead of appending a second removal entry.
-      auditId: `removed_${testerId}`,
+      // Deterministic, so the create-if-absent write fails on a retry instead of
+      // appending a second removal entry.
+      auditId: `removed_${testerId || userId}`,
+      // Version precondition: if anyone edited this user between our read and
+      // the commit — including the main app updating `lastLogin` — the removal
+      // fails rather than clobbering their change.
+      updateTime: user.updateTime,
       auditEntry,
       releaseCollection: releaseId ? REQUEST_EMAILS : null,
       releaseId,
     });
   } catch (error) {
     if (error && (error.status === 409 || error.status === 412)) {
-      // Someone changed the tester concurrently. Re-read so the retry reports
+      // Someone changed the user concurrently. Re-read so the retry reports
       // accurately rather than blindly clobbering.
-      const current = await store.getDocument(TESTERS, testerId);
-      if (current && current.removed) {
+      const current = await store.getDocument(USERS, userId);
+      if (current && !current.tester) {
+        const prior = Array.isArray(current.testerHistory)
+          ? current.testerHistory.at(-1)
+          : null;
         return {
-          testerId,
+          userId,
+          testerId: prior?.id ?? testerId,
           removed: true,
           alreadyRemoved: true,
-          testerNumber: current.testerNumber ?? null,
+          testerNumber: prior?.testerNumber ?? tester.testerNumber ?? null,
           releasedMarker: false,
         };
       }
@@ -603,9 +780,10 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
   }
 
   return {
+    userId,
     testerId,
     removed: true,
-    alreadyRemoved: false,
+    alreadyRemoved: Boolean(result?.alreadyRemoved),
     testerNumber: tester.testerNumber ?? null,
     email: email || null,
     // The caller reissues the card so the applicant's wallet shows REVOKED.
@@ -620,8 +798,13 @@ export async function removeTester(store, { testerId, reason, actorUid, actorEma
  *
  * Mirrors the setTesterStatus / setTesterActive callables, including the rule
  * that `active` is derived from `status` rather than set independently.
+ *
+ * Addresses the user, not the tester: `tester` is a map on the user document,
+ * so the caller passes the Auth uid and the patch is written to `tester.*`.
+ * A user with no `tester` map has been removed from the programme and cannot
+ * have their status changed — that is a 404, not a silent recreate.
  */
-export async function setTesterStatus(store, { testerId, status, active, reason, actorUid }) {
+export async function setTesterStatus(store, { userId, status, active, reason, actorUid }) {
   const target = status || (active ? STATUS.ACCEPTED : STATUS.REVOKED);
 
   if (status && !Object.values(STATUS).includes(status)) {
@@ -639,10 +822,20 @@ export async function setTesterStatus(store, { testerId, status, active, reason,
     throw new AcceptError(400, "A reason is required when deactivating a tester.");
   }
 
-  const tester = await store.getDocument(TESTERS, testerId);
-  if (!tester) throw new AcceptError(404, "No such tester.");
+  if (!userId || typeof userId !== "string") {
+    throw new AcceptError(400, "userId is required.");
+  }
+
+  const user = await store.getDocument(USERS, userId);
+  // Absent document and absent `tester` map are different situations and are
+  // reported differently: the first is a bad id, the second is someone who has
+  // already been removed from the programme.
+  if (!user) throw new AcceptError(404, "No such user.");
+  const tester = user.tester;
+  if (!tester) throw new AcceptError(404, "This user is not a tester.");
   if (tester.status === target) throw new AcceptError(409, `Already ${target}.`);
 
+  const testerId = tester.id || null;
   const now = new Date();
   const patch = {
     status: target,
@@ -669,17 +862,20 @@ export async function setTesterStatus(store, { testerId, status, active, reason,
     patch.deactivationReason = cleanReason ? String(cleanReason).slice(0, 300) : null;
   }
 
-  await store.updateDocument(TESTERS, testerId, patch);
+  // Masked to tester.* so the user's other fields cannot be clobbered.
+  await store.patchTester(USERS, userId, patch);
 
   await writeAudit(store, {
     actor: actorUid || "system",
     action: `tester.status.${target}`,
+    userId,
     testerId,
     detail: { from: tester.status ?? null, to: target, reason: reason || null },
     at: now,
   });
 
   return {
+    userId,
     testerId,
     status: target,
     active: patch.active,

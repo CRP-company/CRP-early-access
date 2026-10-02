@@ -51,7 +51,7 @@ describe("buildApplicationReceivedEmail", () => {
   });
 
   it("includes both images", () => {
-    expect(html).toContain("https://i.postimg.cc/K8zf4q4q/CRPlogo.png");
+    expect(html).toContain("https://github.com/CRP-company/CRP-early-access/blob/main/assets/CRPlogo.png?raw=true");
     expect(html).toContain("1776869274976-74e932ff-18d5-462e-885b-c6ed42d42bcf.png");
   });
 
@@ -205,8 +205,26 @@ describe("decideViaWorker", () => {
       requestId: "r1",
       decision: "approved",
       note: "strong fit",
+      // Sent only to create the applicant's account. The Worker ignores it when
+      // the account already exists, and never echoes it back.
+      password: null,
     });
     expect(calls[0].init.headers.Authorization).toBe(`Bearer ${JWT}`);
+  });
+
+  it("forwards the password needed to create the applicant's account", async () => {
+    const { impl, calls } = captureFetch();
+    await decideViaWorker({
+      url: URL_UNDER_TEST,
+      token: JWT,
+      requestId: "r1",
+      decision: "approved",
+      password: "correct horse",
+      fetchImpl: impl,
+    });
+    // The tester record is written to `users/{uid}`, so an applicant with no
+    // CRP account yet needs one created — which requires a password.
+    expect(JSON.parse(calls[0].init.body).password).toBe("correct horse");
   });
 
   it("defaults note to an empty string", async () => {

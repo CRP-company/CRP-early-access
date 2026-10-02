@@ -25,6 +25,24 @@ import restSource from "../src/firestore-rest.js?raw";
 
 const EMAIL = "alex@example.com";
 
+// The Auth layer is stubbed so these tests stay about Firestore behaviour.
+// A removed tester's account survives, so the fixture's uid is always found —
+// which is exactly the re-application case tests 9 and 10 depend on.
+const authState = { existing: new Map([[EMAIL, { uid: "u1", email: EMAIL }]]) };
+
+vi.mock("../src/user-account.js", async () => {
+  const actual = await vi.importActual("../src/user-account.js");
+  return {
+    ...actual,
+    findUserByEmail: async (_sa, email) => authState.existing.get(String(email).toLowerCase()) || null,
+    createUser: async (_sa, { email, displayName }) => {
+      const user = { uid: `uid-${authState.existing.size + 1}`, email, displayName };
+      authState.existing.set(String(email).toLowerCase(), user);
+      return user;
+    },
+  };
+});
+
 /** The requestEmails key js/signup.js computes for an address. */
 async function markerKey(email) {
   const digest = await crypto.subtle.digest(
@@ -79,32 +97,67 @@ function memoryStore(seed = {}) {
         .map(([k, v]) => ({ id: k.split("/").pop(), ...v }));
     },
 
+    /** Merge into `tester.<key>`, matching the real updateMask behaviour. */
+    async patchTester(c, id, patch) {
+      const key = `${c}/${id}`;
+      const cur = docs.get(key);
+      if (!cur) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+      const tester = { ...(cur.tester || {}) };
+      for (const [k, v] of Object.entries(patch)) tester[k] = v;
+      docs.set(key, { ...cur, tester, updateTime: bump() });
+      return true;
+    },
+
     /**
      * Atomic archive + marker release. Writes are staged and applied only once
      * every precondition has been validated, so a partial remove is impossible —
      * exactly the failure mode this feature exists to prevent.
+     *
+     * Removal MOVES the tester: the snapshot is appended to `testerHistory` and
+     * the `tester` field is deleted, so "in the programme" stays a plain
+     * field-existence check.
      */
-    async removeTester({
+    async removeTesterToHistory({
       collection,
       id,
-      patch,
-      updateTime,
+      archived,
       auditCollection,
       auditId,
       auditEntry,
       releaseCollection = null,
       releaseId = null,
+      updateTime,
     }) {
       const staged = [];
 
       const key = `${collection}/${id}`;
       const cur = docs.get(key);
-      if (!cur || (updateTime && updateTime !== cur.updateTime)) {
+      if (!cur) {
+        const e = new Error("not found");
+        e.status = 404;
+        throw e;
+      }
+      // Versioned precondition, as Firestore enforces inside the transaction:
+      // a document that moved under us must fail rather than be clobbered.
+      if (updateTime && updateTime !== cur.updateTime) {
         const e = new Error("precondition");
         e.status = 409;
         throw e;
       }
-      staged.push([key, { ...cur, ...patch, updateTime: bump() }]);
+      // Already gone: a retry must not append a second history entry.
+      if (!cur.tester) {
+        return { removed: true, alreadyRemoved: true };
+      }
+
+      const history = Array.isArray(cur.testerHistory) ? cur.testerHistory : [];
+      const next = { ...cur, testerHistory: [...history, archived] };
+      // An explicit null in the updateMask is how a field is deleted.
+      delete next.tester;
+      staged.push([key, { ...next, updateTime: bump() }]);
 
       // `create` fails on an existing id, so a retry cannot append a second
       // history entry.
@@ -125,26 +178,40 @@ function memoryStore(seed = {}) {
         if (v === null) docs.delete(k);
         else docs.set(k, v);
       }
-      return { removed: true };
+      return { removed: true, alreadyRemoved: false };
     },
   };
 }
 
 const TESTER = () => ({
-  "testers/t1": {
-    name: "Alex Morgan",
+  // The tester is a map on the user document, and the user's own fields sit
+  // alongside it. Removal must disturb neither the map's siblings nor the
+  // archived snapshot's contents.
+  "users/u1": {
     email: EMAIL,
-    status: "accepted",
-    active: true,
-    testerNumber: 4,
-    createdAt: "2026-09-01T00:00:00.000Z",
-    activity: { lastPeriod: null, comments: 3, reviews: 1 },
+    displayName: "Alex Morgan",
+    friends: ["friend-1"],
+    lastLogin: "2026-09-30T12:00:00.000Z",
+    tester: {
+      id: "t1",
+      userId: "u1",
+      name: "Alex Morgan",
+      email: EMAIL,
+      status: "accepted",
+      active: true,
+      testerNumber: 4,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      activity: { lastPeriod: null, comments: 3, reviews: 1 },
+    },
   },
 });
 
 const REASON = { reason: "no longer testing", actorUid: "admin-1" };
 const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
 const counterValue = (s) => s.docs.get(`${META_COLLECTION}/${COUNTER_DOC}`)?.lastNumber;
+
+/** The most recent archived snapshot, i.e. what the roster used to show. */
+const archived = (s) => s.docs.get("users/u1").testerHistory.at(-1);
 
 /** A store with a tester and the requestEmails marker signup would have left. */
 async function seeded() {
@@ -210,25 +277,40 @@ const env = () => ({
 describe("REMOVE — leaving the program", () => {
   it("1. takes the tester out of the active program", async () => {
     const { store } = await seeded();
-    const result = await removeTester(store, { testerId: "t1", ...REASON });
+    const result = await removeTester(store, { userId: "u1", ...REASON });
 
     expect(result.removed).toBe(true);
     expect(result.alreadyRemoved).toBe(false);
 
-    const tester = store.docs.get("testers/t1");
-    expect(tester.removed).toBe(true);
-    expect(tester.active).toBe(false);
-    // Archived, not deleted: the document is still on the record.
-    expect(store.docs.has("testers/t1")).toBe(true);
+    // The `tester` map is gone, which is what "not in the programme" means now.
+    expect(store.docs.get("users/u1").tester).toBeUndefined();
+    // The user document itself survives — they are still a CRP account.
+    expect(store.docs.has("users/u1")).toBe(true);
+    // And the snapshot is on the history instead of being discarded.
+    expect(archived(store).removed).toBe(true);
+    expect(archived(store).active).toBe(false);
+  });
+
+  it("1b. leaves the user's other fields untouched", async () => {
+    const { store } = await seeded();
+    await removeTester(store, { userId: "u1", ...REASON });
+
+    // The user document belongs partly to the main app, so a tester removal
+    // must not disturb anything outside the tester fields.
+    const user = store.docs.get("users/u1");
+    expect(user.email).toBe(EMAIL);
+    expect(user.displayName).toBe("Alex Morgan");
+    expect(user.friends).toEqual(["friend-1"]);
+    expect(user.lastLogin).toBe("2026-09-30T12:00:00.000Z");
   });
 
   it("2. keeps the tester number and retires it, never reusing it", async () => {
     const { store } = await seeded();
-    const result = await removeTester(store, { testerId: "t1", ...REASON });
+    const result = await removeTester(store, { userId: "u1", ...REASON });
 
-    // The number stays on the record for history...
+    // The number stays on the archived snapshot...
     expect(result.testerNumber).toBe(4);
-    expect(store.docs.get("testers/t1").testerNumber).toBe(4);
+    expect(archived(store).testerNumber).toBe(4);
     // ...and the counter is untouched, so #4 is never handed out again.
     expect(counterValue(store)).toBeUndefined();
   });
@@ -236,7 +318,7 @@ describe("REMOVE — leaving the program", () => {
   it("3. writes an audit entry with tester, number, email, admin and reason", async () => {
     const { store } = await seeded();
     await removeTester(store, {
-      testerId: "t1",
+      userId: "u1",
       reason: "no longer testing",
       actorUid: "admin-1",
       actorEmail: "staff@crp.com",
@@ -248,6 +330,7 @@ describe("REMOVE — leaving the program", () => {
 
     expect(entry.action).toBe("tester.removed");
     expect(entry.testerId).toBe("t1");
+    expect(entry.userId).toBe("u1");
     expect(entry.testerNumber).toBe(4);
     expect(entry.email).toBe(EMAIL);
     expect(entry.actor).toBe("admin-1");
@@ -261,7 +344,7 @@ describe("REMOVE — leaving the program", () => {
     const { store, key } = await seeded();
     expect(store.docs.has(`requestEmails/${key}`)).toBe(true);
 
-    const result = await removeTester(store, { testerId: "t1", ...REASON });
+    const result = await removeTester(store, { userId: "u1", ...REASON });
 
     expect(result.releasedMarker).toBe(true);
     expect(store.docs.has(`requestEmails/${key}`)).toBe(false);
@@ -272,52 +355,73 @@ describe("REMOVE — leaving the program", () => {
 
     for (const bad of [undefined, null, "", "   "]) {
       await expect(
-        removeTester(store, { testerId: "t1", reason: bad, actorUid: "admin-1" }),
+        removeTester(store, { userId: "u1", reason: bad, actorUid: "admin-1" }),
       ).rejects.toThrow(/reason is required/i);
     }
-    expect(store.docs.get("testers/t1").removed).toBeUndefined();
+    // Nothing was written, so the tester is still on the roster.
+    expect(store.docs.get("users/u1").tester).toBeDefined();
+    expect(store.docs.get("users/u1").testerHistory).toBeUndefined();
   });
 
-  it("6. 404s an unknown tester and 400s a missing id", async () => {
+  it("6. 404s an unknown user and 400s a missing id", async () => {
     const { store } = await seeded();
 
-    await expect(removeTester(store, { testerId: "nope", ...REASON })).rejects.toThrow(
-      /No such tester/,
+    await expect(removeTester(store, { userId: "nope", ...REASON })).rejects.toThrow(
+      /No such user/,
     );
-    await expect(removeTester(store, { ...REASON })).rejects.toThrow(/testerId is required/);
+    await expect(removeTester(store, { ...REASON })).rejects.toThrow(/userId is required/);
   });
 
-  it("7. preserves the activity history on the archived record", async () => {
+  it("7. preserves the activity history on the archived snapshot", async () => {
     const { store } = await seeded();
-    await removeTester(store, { testerId: "t1", ...REASON });
+    await removeTester(store, { userId: "u1", ...REASON });
 
-    const tester = store.docs.get("testers/t1");
-    expect(tester.activity).toEqual({ lastPeriod: null, comments: 3, reviews: 1 });
-    expect(tester.name).toBe("Alex Morgan");
-    expect(tester.createdAt).toBe("2026-09-01T00:00:00.000Z");
+    const snap = archived(store);
+    expect(snap.activity).toEqual({ lastPeriod: null, comments: 3, reviews: 1 });
+    expect(snap.name).toBe("Alex Morgan");
+    expect(snap.createdAt).toBe("2026-09-01T00:00:00.000Z");
+  });
+
+  it("7b. appends to an existing history rather than replacing it", async () => {
+    // A second tenure on the same account must not erase the first one's record.
+    const { store } = await seeded();
+    store.docs.get("users/u1").testerHistory = [
+      { id: "t_old", testerNumber: 2, removed: true, removalReason: "moved away" },
+    ];
+
+    await removeTester(store, { userId: "u1", ...REASON });
+
+    const history = store.docs.get("users/u1").testerHistory;
+    expect(history).toHaveLength(2);
+    expect(history[0].id).toBe("t_old");
+    expect(history[0].removalReason).toBe("moved away");
+    expect(history[1].id).toBe("t1");
   });
 
   it("8. running Remove twice is safe and writes only one audit entry", async () => {
     const { store } = await seeded();
 
-    const first = await removeTester(store, { testerId: "t1", ...REASON });
+    const first = await removeTester(store, { userId: "u1", ...REASON });
     expect(first.alreadyRemoved).toBe(false);
 
-    const second = await removeTester(store, { testerId: "t1", ...REASON });
+    const second = await removeTester(store, { userId: "u1", ...REASON });
     expect(second.removed).toBe(true);
     expect(second.alreadyRemoved).toBe(true);
 
     const audits = [...store.docs.entries()].filter(([k]) => k.startsWith("audit/"));
     expect(audits).toHaveLength(1);
     expect(second.testerNumber).toBe(4);
+    // Crucially: the history was not appended a second time.
+    expect(store.docs.get("users/u1").testerHistory).toHaveLength(1);
   });
 
   it("9. a new application from the same email is NOT linked to the old tester", async () => {
     const { store } = await seeded();
-    await removeTester(store, { testerId: "t1", ...REASON });
+    await removeTester(store, { userId: "u1", ...REASON });
 
-    // The archived tester is still in the collection, so the duplicate-email
-    // lookup must skip it or the new application would be linked back to t1.
+    // The old record now lives on testerHistory, so the "already a tester" check
+    // — which looks at the `tester` map — must not find it, or the new
+    // application would be linked back to the removed tenure.
     store.docs.set("requests/r2", REQ({ email: EMAIL }));
     const result = await decideRequest(store, {
       requestId: "r2",
@@ -327,12 +431,14 @@ describe("REMOVE — leaving the program", () => {
     });
 
     expect(result.testerId).toBe("t_r2");
-    expect(store.docs.get("testers/t_r2")).toBeDefined();
+    expect(store.docs.get("users/u1").tester.id).toBe("t_r2");
+    // The previous tenure is still on the history, untouched.
+    expect(store.docs.get("users/u1").testerHistory).toHaveLength(1);
   });
 
   it("10. re-approving after removal creates a NEW tester number", async () => {
     const { store } = await seeded();
-    await removeTester(store, { testerId: "t1", ...REASON });
+    await removeTester(store, { userId: "u1", ...REASON });
 
     store.docs.set("requests/r2", REQ({ email: EMAIL }));
     const result = await decideRequest(store, {
@@ -342,15 +448,16 @@ describe("REMOVE — leaving the program", () => {
       env: env(),
     });
 
+    // A fresh number from the counter, not the retired #4.
     expect(result.testerNumber).toBe(1);
     expect(result.testerId).toBe("t_r2");
   });
 
   it("11. a removed tester's card is issued as REVOKED, same object id", async () => {
     const { store } = await seeded();
-    await removeTester(store, { testerId: "t1", ...REASON });
+    await removeTester(store, { userId: "u1", ...REASON });
 
-    expect(store.docs.get("testers/t1").active).toBe(false);
+    expect(archived(store).active).toBe(false);
 
     const url = await buildSaveUrl({
       tester: { id: "t1", name: "Alex Morgan" },
@@ -362,7 +469,9 @@ describe("REMOVE — leaving the program", () => {
       Buffer.from(url.split("/").pop().split(".")[1], "base64url").toString(),
     );
     expect(claims.payload.loyaltyObjects[0].state).toBe("REVOKED");
-    // Same object id as before: revoked, not replaced by a second pass.
+    // Same object id as before: revoked, not replaced by a second pass. The
+    // tester id survives the move into the user document, so cards already
+    // issued keep updating rather than being reissued under a new id.
     expect(claims.payload.loyaltyObjects[0].id).toBe(`${ISSUER_ID}.crp_tester_loyalty_t1`);
   });
 
@@ -373,8 +482,8 @@ describe("REMOVE — leaving the program", () => {
     const key = await markerKey(EMAIL);
     store.docs.set(`requestEmails/${key}`, { requestId: "r1", createdAt: "x" });
 
-    await expect(removeTester(store, { testerId: "r1", ...REASON })).rejects.toThrow(
-      /No such tester/,
+    await expect(removeTester(store, { userId: "u1", ...REASON })).rejects.toThrow(
+      /No such user/,
     );
     expect(store.docs.has(`requestEmails/${key}`)).toBe(true);
   });
@@ -384,41 +493,45 @@ describe("REMOVE — leaving the program", () => {
     // blocked from re-applying.
     const { store, key } = await seeded();
     await setTesterStatus(store, {
-      testerId: "t1",
+      userId: "u1",
       active: false,
       reason: "paused",
       ...actor,
     });
 
-    expect(store.docs.get("testers/t1").active).toBe(false);
-    expect(store.docs.get("testers/t1").removed).toBeUndefined();
+    // The `tester` map is still present, which is what "still in the program"
+    // means — and nothing was archived.
+    expect(store.docs.get("users/u1").tester.active).toBe(false);
+    expect(store.docs.get("users/u1").testerHistory).toBeUndefined();
     // Duplicate protection still in force.
     expect(store.docs.has(`requestEmails/${key}`)).toBe(true);
   });
 
   it("14. a concurrent edit fails the removal rather than clobbering it", async () => {
     const { store } = await seeded();
-    const stale = (await store.getDocument("testers", "t1")).updateTime;
 
-    // Someone else edits the tester between our read and the commit, so the
+    // Someone else edits the user between our read and the commit, so the
     // versioned precondition must reject rather than overwrite their change.
-    await store.updateDocument("testers", "t1", { status: "revoked" });
+    const stale = (await store.getDocument("users", "u1")).updateTime;
+    await store.updateDocument("users", "u1", { lastLogin: "2026-09-30T13:00:00.000Z" });
 
     await expect(
-      store.removeTester({
-        collection: "testers",
-        id: "t1",
-        patch: { removed: true },
-        updateTime: stale,
+      store.removeTesterToHistory({
+        collection: "users",
+        id: "u1",
+        archived: { id: "t1", removed: true },
         auditCollection: "audit",
         auditId: "removed_t1",
         auditEntry: { action: "tester.removed" },
+        // The stale version is what fails the precondition.
+        updateTime: stale,
       }),
     ).rejects.toThrow();
 
     // The concurrent edit survived; nothing was clobbered.
-    expect(store.docs.get("testers/t1").status).toBe("revoked");
-    expect(store.docs.get("testers/t1").removed).toBeUndefined();
+    expect(store.docs.get("users/u1").lastLogin).toBe("2026-09-30T13:00:00.000Z");
+    expect(store.docs.get("users/u1").tester).toBeDefined();
+    expect(store.docs.get("users/u1").testerHistory).toBeUndefined();
     // And no audit entry was written for the failed attempt.
     expect([...store.docs.keys()].filter((k) => k.startsWith("audit/"))).toHaveLength(0);
   });
@@ -434,29 +547,32 @@ describe("removeTester wire format", () => {
     const base = memoryStore(TESTER());
     return {
       ...base,
-      async removeTester(args) {
+      async removeTesterToHistory(args) {
         captured.push(args);
-        return { removed: true };
+        return { removed: true, alreadyRemoved: false };
       },
     };
   }
 
   it("sends an update, an audit create and a marker delete in one call", async () => {
     const captured = [];
-    await removeTester(recordingStore(captured), { testerId: "t1", ...REASON });
+    await removeTester(recordingStore(captured), { userId: "u1", ...REASON });
 
     expect(captured).toHaveLength(1);
     const args = captured[0];
 
-    // The tester is archived under a versioned precondition.
-    expect(args.collection).toBe("testers");
-    expect(args.id).toBe("t1");
-    expect(args.updateTime).toBeTruthy();
-    expect(args.patch.removed).toBe(true);
+    // Addressed by uid, on the users collection, not by tester id.
+    expect(args.collection).toBe("users");
+    expect(args.id).toBe("u1");
+    // The whole prior record is archived, not a partial patch.
+    expect(args.archived.id).toBe("t1");
+    expect(args.archived.removed).toBe(true);
+    expect(args.archived.testerNumber).toBe(4);
 
     // The audit id is deterministic, so a retry cannot append a second entry.
     expect(args.auditId).toBe("removed_t1");
     expect(args.auditEntry.action).toBe("tester.removed");
+    expect(args.auditEntry.userId).toBe("u1");
     expect(args.auditEntry.testerNumber).toBe(4);
     expect(args.auditEntry.email).toBe(EMAIL);
 
@@ -465,23 +581,25 @@ describe("removeTester wire format", () => {
     expect(args.releaseId).toBe(await markerKey(EMAIL));
   });
 
-  it("keeps the tester number out of the archive patch's removable fields", async () => {
+  it("keeps the tester number on the archived record, never decremented", async () => {
     const captured = [];
-    await removeTester(recordingStore(captured), { testerId: "t1", ...REASON });
+    await removeTester(recordingStore(captured), { userId: "u1", ...REASON });
 
-    const patch = captured[0].patch;
-    // The number is retained on the record, never cleared or decremented.
-    expect(patch.testerNumber).toBeUndefined();
-    // Nor is the counter touched by a removal.
-    expect(patch.lastNumber).toBeUndefined();
+    // The number is retained on the snapshot, so history can name it...
+    expect(captured[0].archived.testerNumber).toBe(4);
+    // ...and no counter field is ever written by a removal.
+    expect(captured[0].archived.lastNumber).toBeUndefined();
   });
 
   it("omits the marker write when the tester has no email", async () => {
     const captured = [];
     const store = recordingStore(captured);
-    store.docs.set("testers/t9", { name: "No Email", status: "accepted", active: true });
+    store.docs.set("users/u9", {
+      email: "",
+      tester: { id: "t9", name: "No Email", status: "accepted", active: true },
+    });
 
-    await removeTester(store, { testerId: "t9", ...REASON });
+    await removeTester(store, { userId: "u9", ...REASON });
 
     // Nothing to release, and that must not become a malformed delete.
     expect(captured[0].releaseId).toBeNull();
@@ -503,6 +621,16 @@ describe("Firestore Write shape", () => {
     expect(source).toMatch(/currentDocument:\s*\{\s*exists:\s*false\s*\}/);
     // The marker release is a bare delete.
     expect(source).toMatch(/writes\.push\(\{\s*delete:/);
+  });
+
+  it("deletes the tester map with an explicit null inside the updateMask", () => {
+    // The move-to-history is the one non-obvious part of the wire format: there
+    // is no "delete field" verb, so `tester` has to be listed in the mask AND
+    // sent as a nullValue. Doing only one of the two leaves the field in place
+    // (mask without null) or errors (null without mask).
+    const source = restSource;
+    expect(source).toMatch(/encodeFields\(\{ tester: null, testerHistory:/);
+    expect(source).toMatch(/fieldPaths:\s*\["tester",\s*"testerHistory"\]/);
   });
 });
 
@@ -529,6 +657,20 @@ describe("Worker route /tester-remove", () => {
   });
 
   it("hides removed testers from the roster", () => {
-    expect(adminSource).toMatch(/filter\(\(doc\) => !doc\.data\(\)\.removed\)/);
+    // Membership is now the existence of the `tester` map, so the filter is on
+    // that rather than on a `removed` flag — which no longer exists, so there is
+    // no flag left to drift out of step with the truth.
+    expect(adminSource).toMatch(/filter\(\(doc\) => Boolean\(doc\.data\(\)\.tester\)\)/);
+    expect(adminSource).not.toMatch(/data\(\)\.removed/);
+  });
+
+  it("addresses the routes by userId, not testerId", () => {
+    // The tester record lives on the user document, so the dashboard sends the
+    // Auth uid and the Worker reads it back out of the body.
+    expect(adminSource).toMatch(/body: \{ userId, reason \}/);
+    expect(adminSource).toMatch(/body: \{ userId, active, reason \}/);
+    expect(adminSource).toMatch(/body: \{ userId \}/);
+    expect(indexSource).toMatch(/const \{ userId, reason \} = body \|\| \{\}/);
+    expect(indexSource).toMatch(/const \{ userId \} = body \|\| \{\}/);
   });
 });

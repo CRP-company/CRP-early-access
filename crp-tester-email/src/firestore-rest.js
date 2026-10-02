@@ -100,7 +100,7 @@ export function createFirestore(secretJson, projectId) {
 
   /**
    * The relative resource name, e.g.
-   * `projects/p/databases/(default)/documents/testers/t1`.
+   * `projects/p/databases/(default)/documents/users/uid1`.
    *
    * Distinct from docName(), which is a full URL. The `name` inside a Firestore
    * `Write` must be relative, not an absolute URL — passing the full URL is
@@ -272,7 +272,7 @@ export function createFirestore(secretJson, projectId) {
   /**
    * List a whole collection with its document ids.
    *
-   * Used to find an existing tester by email. The roster is small, so a full
+   * Used to find an existing user by email. The roster is small, so a full
    * scan is acceptable and avoids maintaining a separate email index.
    *
    * `collection` may be a nested path like "testers/t1/feedback".
@@ -455,59 +455,17 @@ export function createFirestore(secretJson, projectId) {
     }
   }
 
-  /**
-   * Delete a document.
-   *
-   * Used to release a lookup pointer when a tester leaves the program. A missing
-   * document is reported as a 404 error rather than swallowed, so the caller can
-   * distinguish "already gone" from a real failure.
-   *
-   * Firestore's Write has no `delete` verb, so this is a standalone DELETE against
-   * the document resource.
-   */
-  async function deleteDocument(collection, id) {
-    const res = await fetch(pathUrl(`${collection}/${id}`), {
-      method: "DELETE",
-      headers: await authHeaders(),
-    });
-    if (!res.ok) {
-      const err = new Error(`delete ${collection}/${id} failed (${res.status}): ${await res.text()}`);
-      err.status = res.status;
-      throw err;
-    }
-    return true;
-  }
-
-  /**
-   * List a subcollection's documents, e.g. "testers/t1/feedback".
-   *
-   * A named alias rather than just passing the nested path to listCollection,
-   * because the pairing matters: listCollection takes a *collection*, while this
-   * takes a *parent document path*. Two similarly-shaped string arguments with
-   * opposite meanings is exactly the kind of thing that is wrong by accident at
-   * a call site and nowhere else.
-   *
-   * @param {string} parentPath  e.g. "testers/t1"
-   * @param {string} subcollection  e.g. "feedback"
-   */
-  async function listSubcollection(parentPath, subcollection) {
-    // Validate before building a URL out of it: a malformed path should fail
-    // here with a clear message, not as an opaque 400 from the API.
-    splitPath(parentPath);
-    return listCollection(`${parentPath}/${subcollection}`);
-  }
-
   return {
     getDocument,
     createDocument,
     updateDocument,
-    deleteDocument,
     listCollection,
     listSubcollection,
     beginTransaction,
     commit,
     rollback,
     removeTester,
+    removeTesterToHistory,
     rejectRequestAndReleaseMarker,
     releaseRejectedRequestMarker,
     docName,

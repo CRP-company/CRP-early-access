@@ -24,6 +24,9 @@ const {
   runTransaction,
   updateDoc,
   deleteDoc,
+  // Used to prove a client cannot delete the `tester` map off its own document
+  // to erase the record of having been a tester.
+  deleteField,
   serverTimestamp,
 } = require("firebase/firestore");
 
@@ -194,52 +197,166 @@ test("anonymous visitor CANNOT delete a request", async () => {
   await assertFails(deleteDoc(doc(anon(), "requests", "any-id")));
 });
 
-/* ------------------------------------------------- testers: no client writes */
+/* --------------------------------------------- users: tester is not writable */
 
-test("anonymous visitor CANNOT create a tester", async () => {
+// The tester record is a nested `tester` map on the user document. That makes
+// these rules load-bearing in a new way: the document is READABLE and partly
+// WRITABLE by its owner for the main app's sake, so the guard cannot be "deny
+// all client writes" any more. It has to be "the owner may never touch `tester`".
+
+test("anonymous visitor CANNOT create a user document", async () => {
   await assertFails(
-    setDoc(doc(anon(), "testers", "forged"), { email: "mallory@example.com", active: true }),
+    setDoc(doc(anon(), "users", "forged"), { email: "mallory@example.com" }),
   );
 });
 
 test("anonymous visitor CANNOT set themselves active", async () => {
-  await assertFails(updateDoc(doc(anon(), "testers", "t_seed"), { active: true }));
+  await assertFails(updateDoc(doc(anon(), "users", "u2"), { "tester.active": true }));
 });
 
-test("anonymous visitor CANNOT list testers", async () => {
-  await assertFails(getDocs(collection(anon(), "testers")));
+test("anonymous visitor CANNOT list users", async () => {
+  await assertFails(getDocs(collection(anon(), "users")));
 });
 
-test("signed-in non-admin CANNOT create a tester", async () => {
+test("anonymous visitor CANNOT read a user document", async () => {
+  await assertFails(getDoc(doc(anon(), "users", "u2")));
+});
+
+test("signed-in non-admin CANNOT create a user document for someone else", async () => {
+  // Self-service create IS allowed (the main app needs it at signup), so the
+  // guard is on WHOSE document, not on creating at all. A client must never be
+  // able to write a document for an account it does not own.
   await assertFails(
-    setDoc(doc(asUser("u1", "someone@example.com"), "testers", "forged"), {
-      email: "someone@example.com",
-      active: true,
+    setDoc(doc(asUser("u1", "someone@example.com"), "users", "u3"), {
+      email: "other@example.com",
     }),
   );
 });
 
-/* ------------------------------------------------------ testers: admin reads */
-
-test("admin CAN list and read testers", async () => {
-  await assertSucceeds(getDocs(collection(asAdmin(), "testers")));
-  await assertSucceeds(getDoc(doc(asAdmin(), "testers", "t_seed")));
-});
-
-test("admin CANNOT write testers directly (functions only)", async () => {
-  await assertFails(
-    setDoc(doc(asAdmin(), "testers", "forged"), { email: "staff-made@crp.com", active: true }),
+test("a user CAN create their own document at signup", async () => {
+  // The positive case, so the rule above is an ownership check and not a
+  // blanket denial that would break signup in the main app.
+  await assertSucceeds(
+    setDoc(doc(asUser("u1", "someone@example.com"), "users", "u1"), {
+      email: "someone@example.com",
+      displayName: "Someone",
+      friends: [],
+      friendRequests: [],
+    }),
   );
 });
 
-test("tester CAN read their own record but not another's", async () => {
-  const db = asUser("u2", "tester@example.com");
-  await assertSucceeds(getDoc(doc(db, "testers", "t_seed")));
-  await assertFails(getDoc(doc(db, "testers", "t_other")));
+test("a user CANNOT create their own document with a tester map", async () => {
+  // Self-service create is allowed, but never one that arrives pre-approved.
+  await assertFails(
+    setDoc(doc(asUser("u1", "someone@example.com"), "users", "u1"), {
+      email: "someone@example.com",
+      tester: { id: "t_forged", status: "accepted", active: true, testerNumber: 99 },
+    }),
+  );
 });
 
-test("tester CANNOT list the whole roster", async () => {
-  await assertFails(getDocs(collection(asUser("u2", "tester@example.com"), "testers")));
+test("a tester CANNOT write their own tester map", async () => {
+  // The single most important rule in the file. `tester.active` drives the
+  // Google Wallet pass, so a client-writable flag would let anyone self-issue a
+  // live card or claim a number.
+  //
+  // NOTE the value: the seed has active=true, and `diff()` only reports fields
+  // that actually CHANGE. Setting active to true is a no-op, so the rule is not
+  // even consulted and the write legitimately succeeds — which proves nothing.
+  // The attack is flipping it to false to keep a live card after being removed,
+  // so that is what is tested.
+  await assertFails(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      "tester.active": false,
+    }),
+  );
+});
+
+test("a tester CANNOT mark themselves accepted", async () => {
+  // The reverse direction: the seeded tester is accepted/active, so this is a
+  // genuine change and must be caught by the diff allowlist.
+  await assertFails(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      "tester.status": "revoked",
+    }),
+  );
+});
+
+test("a tester CANNOT give themselves a tester number", async () => {
+  await assertFails(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      "tester.testerNumber": 1,
+    }),
+  );
+});
+
+test("a tester CANNOT rewrite their tester history", async () => {
+  await assertFails(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      testerHistory: [{ id: "t_forged", testerNumber: 1 }],
+    }),
+  );
+});
+
+test("a tester CANNOT delete their own tester map to erase their record", async () => {
+  // `deleteField()` removes the field from the mask, which the rule must catch:
+  // it is still a change to a key the user does not own.
+  await assertFails(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      tester: deleteField(),
+    }),
+  );
+});
+
+test("a tester CAN update their own app fields without touching tester", async () => {
+  // The self-service path the main app depends on, so the allowlist above is
+  // not accidentally a blanket denial.
+  await assertSucceeds(
+    updateDoc(doc(asUser("u2", "tester@example.com"), "users", "u2"), {
+      lastLogin: serverTimestamp(),
+    }),
+  );
+});
+
+/* ---------------------------------------------------------- users: admin reads */
+
+test("admin CAN list and read users", async () => {
+  await assertSucceeds(getDocs(collection(asAdmin(), "users")));
+  await assertSucceeds(getDoc(doc(asAdmin(), "users", "u2")));
+});
+
+test("admin CANNOT write the tester map directly (Worker only)", async () => {
+  await assertFails(
+    setDoc(doc(asAdmin(), "users", "forged"), {
+      email: "staff-made@crp.com",
+      tester: { id: "t_forged", active: true },
+    }),
+  );
+});
+
+test("user CAN read their own document but not another's", async () => {
+  const db = asUser("u2", "tester@example.com");
+  await assertSucceeds(getDoc(doc(db, "users", "u2")));
+  await assertFails(getDoc(doc(db, "users", "u3")));
+});
+
+test("user CANNOT list the whole roster", async () => {
+  await assertFails(getDocs(collection(asUser("u2", "tester@example.com"), "users")));
+});
+
+test("user CANNOT delete their own document", async () => {
+  await assertFails(deleteDoc(doc(asUser("u2", "tester@example.com"), "users", "u2")));
+});
+
+test("user activity log is readable by its owner and staff only", async () => {
+  await assertSucceeds(getDoc(doc(asUser("u2", "tester@example.com"), "users", "u2", "activity", "2026-09")));
+  await assertFails(getDoc(doc(asUser("u2", "tester@example.com"), "users", "u3", "activity", "2026-09")));
+  await assertFails(
+    setDoc(doc(asUser("u2", "tester@example.com"), "users", "u2", "activity", "2026-10"), {
+      comments: 99,
+    }),
+  );
 });
 
 /* --------------------------------------------------------- audit is locked */
@@ -444,15 +561,36 @@ test("unknown collections are denied by default", async () => {
   const adminApp = initializeApp({ projectId: PROJECT });
   adminDb = getFirestore(adminApp);
 
-  await adminDb.doc("testers/t_seed").set({
+  // Seeded via the Admin SDK, bypassing rules — exactly how the Worker writes.
+  // The tester is a nested map on the user document, and the surrounding
+  // user fields are there to prove a tester write cannot disturb them.
+  await adminDb.doc("users/u2").set({
     email: "tester@example.com",
-    name: "Seed Tester",
-    active: true,
+    displayName: "Seed Tester",
+    friends: ["u3"],
+    lastLogin: new Date("2026-09-30T14:57:01.000Z"),
+    tester: {
+      id: "t_seed",
+      userId: "u2",
+      name: "Seed Tester",
+      email: "tester@example.com",
+      status: "accepted",
+      active: true,
+      testerNumber: 4,
+    },
   });
-  await adminDb.doc("testers/t_other").set({
+  await adminDb.doc("users/u3").set({
     email: "other@example.com",
-    name: "Other Tester",
-    active: false,
+    displayName: "Other Tester",
+    tester: {
+      id: "t_other",
+      userId: "u3",
+      name: "Other Tester",
+      email: "other@example.com",
+      status: "revoked",
+      active: false,
+      testerNumber: 5,
+    },
   });
 
   let failed = 0;

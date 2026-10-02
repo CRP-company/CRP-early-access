@@ -32,7 +32,7 @@ async function clear(db, name) {
 
   await clear(db, "requests");
   await clear(db, "requestEmails");
-  await clear(db, "testers");
+  await clear(db, "users");
 
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -83,12 +83,13 @@ async function clear(db, name) {
   const markers = await db.collection("requestEmails").get();
   console.log("dedupe markers          :", markers.size);
 
-  // The separation guarantee: a signup must NOT create a tester.
-  const testers = await db.collection("testers").get();
+  // The separation guarantee: a signup must NOT create a user document or a
+  // tester record. The tester map is written only by the Worker on approval.
+  const users = await db.collection("users").get();
   console.log(
-    "documents in testers    :",
-    testers.size,
-    testers.size === 0 ? "(correct — requests stay separate from testers)" : "(UNEXPECTED)",
+    "documents in users      :",
+    users.size,
+    users.size === 0 ? "(correct — a signup creates no account)" : "(UNEXPECTED)",
   );
 
   // A second submission with the same email must be refused as a duplicate.
@@ -113,7 +114,7 @@ async function clear(db, name) {
     stored.size === 1 &&
     stored.docs[0].data().experienceCategory === "everyday_user" &&
     markers.size === 1 &&
-    testers.size === 0 &&
+    users.size === 0 &&
     afterDup.size === 1 &&
     errors.length === 0;
   console.log(ok ? "\nE2E PASS" : "\nE2E FAIL");

@@ -9,7 +9,16 @@
  */
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SCOPE = "https://www.googleapis.com/auth/datastore";
+
+// Two scopes, space-separated as OAuth requires. `datastore` is Firestore;
+// `identitytoolkit` is the Firebase Auth admin API, needed because a tester
+// record now lives on a `users/{uid}` document — and that uid only exists once
+// an Auth account does. The token is cached per isolate, so both are minted in a
+// single round-trip.
+const SCOPE = [
+  "https://www.googleapis.com/auth/datastore",
+  "https://www.googleapis.com/auth/identitytoolkit",
+].join(" ");
 const JWT_LIFETIME_SECONDS = 3600;
 
 // Cached per isolate. Firestore calls several times per request, and signing an

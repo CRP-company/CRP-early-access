@@ -1,15 +1,20 @@
 /**
  * CRP early-access admin dashboard.
  *
- * Shows the two collections side by side, which is the point of the redesign:
- * `requests` is the raw public intake queue, `testers` is the accepted roster.
- * Approving a request creates a tester via a Cloud Function, and the
- * active / not-active flag lives only on `testers`.
+ * Shows the two sides of the roster: `requests` is the raw public intake queue,
+ * and the accepted testers are the `users` documents that carry a `tester` map.
+ * The tester record is a nested map on the account, not a document of its own,
+ * so every row is read one level down and every action is addressed by the
+ * user's Auth uid.
+ *
+ * The active / not-active flag lives only inside `tester`.
  *
  * Security: the dashboard never writes to Firestore directly. Reads are allowed
- * by the `admin` custom claim; every mutation goes through a callable function,
- * which re-checks that claim server-side. A tampered client therefore cannot
- * approve a request or flip a tester's status by talking to Firestore.
+ * by the `admin` custom claim; every mutation goes through the authenticated
+ * Cloudflare Worker, which re-checks that claim server-side. A tampered client
+ * therefore cannot approve a request, flip a status, or hand anyone a tester
+ * map by writing `users.tester` directly — the security rules deny that to
+ * clients entirely.
  */
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
@@ -171,17 +176,41 @@ function showRequestDetails(requestId) {
   els.requestDetails.showModal();
 }
 
+/**
+ * One roster row, built from a `tester` map nested inside a user document.
+ *
+ * `tester` is a map on `users/{uid}`, not a document of its own, so every field
+ * read here is one level down. The uid (`doc.id`) is what identifies the tester
+ * for every action — the Worker routes all take `userId`.
+ */
 function renderTesters(snapshot) {
   els.testersBody.innerHTML = "";
 
-  // Removed testers are archived, not deleted, so they are still in the
-  // collection. Filter them out here so the roster — and its counts — show the
-  // people actually in the program, while the record and its audit history
-  // survive untouched.
-  const visible = snapshot.docs.filter((doc) => !doc.data().removed);
+  // A user is on the roster exactly when they have a `tester` map. Removal
+  // deletes that field and pushes the snapshot onto `testerHistory`, so this
+  // filter is what hides former testers — and unlike the old `removed` flag it
+  // cannot drift, because there is no flag left to get out of step.
+  //
+  // The active/inactive filter is applied here rather than in the query: `active`
+  // is nested under `tester`, and Firestore cannot filter on a nested field
+  // without a composite index and a full-field path. The roster is small enough
+  // that filtering client-side is cheaper than the index it would replace.
+  const wanted = els.testerFilter.value;
+  const withTester = snapshot.docs.filter((doc) => Boolean(doc.data().tester));
 
-  els.testersCount.textContent = visible.length;
-  els.activeCount.textContent = visible.filter((doc) => doc.data().active).length;
+  const visible = withTester.filter((doc) => {
+    if (wanted === "all") return true;
+    const isActive = Boolean(doc.data().tester.active);
+    return wanted === "active" ? isActive : !isActive;
+  });
+
+  // Ordered by acceptance, newest first, matching what the old orderBy did.
+  visible.sort(
+    (a, b) => (b.data().tester.acceptedAt || "").localeCompare(a.data().tester.acceptedAt || ""),
+  );
+
+  els.testersCount.textContent = withTester.length;
+  els.activeCount.textContent = withTester.filter((doc) => doc.data().tester.active).length;
 
   if (visible.length === 0) {
     els.testersBody.innerHTML =
@@ -190,7 +219,7 @@ function renderTesters(snapshot) {
   }
 
   for (const doc of visible) {
-    const data = doc.data();
+    const data = doc.data().tester;
     const isActive = Boolean(data.active);
     const tr = document.createElement("tr");
 
@@ -208,13 +237,13 @@ function renderTesters(snapshot) {
       <td>${formatDate(isActive ? data.activatedAt : data.deactivatedAt)}</td>
       <td class="muted">${escapeHtml(data.deactivationReason || "—")}</td>
       <td class="actions">
-        <button class="btn" data-wallet="${doc.id}">Wallet pass</button>
+        <button class="btn" data-wallet="${escapeHtml(doc.id)}">Wallet pass</button>
         ${
           isActive
-            ? `<button class="btn btn--deactivate" data-deactivate="${doc.id}">Deactivate</button>`
-            : `<button class="btn btn--approve" data-activate="${doc.id}">Reactivate</button>`
+            ? `<button class="btn btn--deactivate" data-deactivate="${escapeHtml(doc.id)}">Deactivate</button>`
+            : `<button class="btn btn--approve" data-activate="${escapeHtml(doc.id)}">Reactivate</button>`
         }
-        <button class="btn btn--deactivate" data-remove="${doc.id}" data-tester-name="${escapeHtml(data.name || data.email || "this tester")}">Remove</button>
+        <button class="btn btn--deactivate" data-remove="${escapeHtml(doc.id)}" data-tester-name="${escapeHtml(data.name || data.email || "this tester")}">Remove</button>
       </td>
     `;
     els.testersBody.appendChild(tr);
@@ -293,13 +322,17 @@ function subscribeRequests() {
 }
 
 function subscribeTesters() {
-  const filter = els.testerFilter.value;
-  const constraints = [orderBy("createdAt", "desc"), limit(200)];
-  if (filter === "active") constraints.unshift(where("active", "==", true));
-  if (filter === "inactive") constraints.unshift(where("active", "==", false));
-
+  // The roster is the `users` collection, filtered down to those with a `tester`
+  // map. Only staff may list it — the rules deny `list` to everyone else, since
+  // the collection holds every account's email address.
+  //
+  // No `where` and no `orderBy`: the fields that matter now live under `tester.*`,
+  // which Firestore cannot filter or sort on without a composite index. The
+  // active/inactive filter and the sort are applied in renderTesters() instead.
+  // Re-subscribing on filter change is therefore unnecessary, but the handler is
+  // left in place so a filter still refreshes the view if the rendering changes.
   return onSnapshot(
-    query(collection(db, "testers"), ...constraints),
+    query(collection(db, "users"), limit(500)),
     (snap) => renderTesters(snap),
     (error) => toast(`Could not load testers: ${error.message}`, "error"),
   );
@@ -341,10 +374,37 @@ const WORKER_URL =
 
 async function decideRequest(requestId, decision, button) {
   let note = "";
+  let password = null;
+
   if (decision === "rejected") {
     const answer = prompt("Reason for rejection (optional):");
     if (answer === null) return; // cancelled
     note = answer;
+  } else {
+    // The tester record is written to `users/{uid}`, so approving someone who has
+    // no CRP account yet has to create one — and an account needs a password.
+    // The Worker reports a clear 400 if it is missing, but asking here means the
+    // applicant never sees a failed approval, and the admin finds out before
+    // anything is written.
+    //
+    // This prompt always appears, because the dashboard cannot know whether the
+    // account exists without an extra lookup. A password for an account that
+    // already exists is simply ignored server-side.
+    const applicant = currentRequests.get(requestId);
+    const who = applicant ? applicant.name || applicant.email : "this applicant";
+    const answer = prompt(
+      `Approve ${who}?\n\n` +
+        `If they do not have a CRP account yet, one is created with the password ` +
+        `you enter now. If they already have an account, this is ignored.\n\n` +
+        `Password (min 6 characters), or leave blank to cancel:`,
+      "",
+    );
+    if (answer === null) return; // cancelled
+    if (answer.trim().length < 6) {
+      toast("Enter a password of at least 6 characters, or cancel.", "error");
+      return;
+    }
+    password = answer;
   }
 
   setBusy(button, true);
@@ -359,6 +419,9 @@ async function decideRequest(requestId, decision, button) {
       requestId,
       decision,
       note,
+      // Sent once over the authenticated admin route and never stored or
+      // echoed back. The Worker uses it only if the account must be created.
+      password,
     });
 
     // The roster list is a live onSnapshot subscription, so the new tester
@@ -380,6 +443,15 @@ async function decideRequest(requestId, decision, button) {
       toast(`${label} But the email was NOT sent — check Resend.`, "error");
     } else if (decision === "approved" && !result.saveUrl) {
       toast(`${label} Email sent, but the Wallet link is missing — reissue the card.`, "warn");
+    } else if (decision === "approved" && result.accountCreated) {
+      // The account is new, so the applicant has credentials nobody has seen.
+      // Saying only "approved" would leave the admin assuming the applicant
+      // already knows how to sign in, and they would discover otherwise.
+      toast(
+        `${label} New CRP account created — pass the password you set to them so ` +
+          `they can sign in.`,
+        "warn",
+      );
     } else {
       toast(label);
     }
@@ -390,7 +462,7 @@ async function decideRequest(requestId, decision, button) {
   }
 }
 
-async function toggleTester(testerId, active, button) {
+async function toggleTester(userId, active, button) {
   let reason = null;
   if (!active) {
     const answer = prompt("Why is this tester being deactivated? (required)");
@@ -414,7 +486,9 @@ async function toggleTester(testerId, active, button) {
     await postToWorker({
       url: `${WORKER_URL}/tester-status`,
       token,
-      body: { testerId, active, reason },
+      // userId, not testerId: the tester record is a map on the user's document,
+      // so the Worker's routes address the account that owns it.
+      body: { userId, active, reason },
     });
     toast(active ? "Tester reactivated." : "Tester deactivated.");
   } catch (error) {
@@ -424,7 +498,7 @@ async function toggleTester(testerId, active, button) {
   }
 }
 
-async function removeTester(testerId, button) {
+async function removeTester(userId, button) {
   // Two prompts, deliberately. Remove is the one destructive action here: it
   // takes someone out of the program AND lets them apply again. A single "are
   // you sure?" is too easy to click through, and unlike Deactivate it cannot be
@@ -433,8 +507,8 @@ async function removeTester(testerId, button) {
   const understood = confirm(
     `Remove ${name} from the CRP Testing Program?\n\n` +
       `This takes them out of the program and revokes their testing card.\n` +
-      `Their record and history are kept, and their tester number is retired.\n` +
-      `They will be allowed to apply again.\n\n` +
+      `Their record moves to their history, and their tester number is retired.\n` +
+      `Their CRP account is kept, so they can sign in and apply again.\n\n` +
       `This cannot be undone from here.`,
   );
   if (!understood) return;
@@ -452,7 +526,7 @@ async function removeTester(testerId, button) {
     const result = await postToWorker({
       url: `${WORKER_URL}/tester-remove`,
       token,
-      body: { testerId, reason },
+      body: { userId, reason },
     });
 
     if (result.alreadyRemoved) {
@@ -477,7 +551,7 @@ async function removeTester(testerId, button) {
   }
 }
 
-async function issueWallet(testerId, button) {
+async function issueWallet(userId, button) {
   setBusy(button, true);
   try {
     // Goes to the Worker, not the `issueWalletPass` callable. That Cloud Function
@@ -489,7 +563,7 @@ async function issueWallet(testerId, button) {
     const result = await postToWorker({
       url: `${WORKER_URL}/tester-wallet`,
       token,
-      body: { testerId },
+      body: { userId },
     });
 
     window.open(result.saveUrl, "_blank", "noopener");

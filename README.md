@@ -6,29 +6,72 @@ with an explicit active / not-active state.
 
 ## The data model
 
-Two sibling collections, deliberately separate lifecycles:
+A public intake queue, and a roster that lives on the user's own account:
 
 ```
 requests/{requestId}        public intake, append-only from the visitor's view
   name, email, consent, experienceCategory, source, userAgent
   status        pending | approved | rejected
   createdAt, updatedAt, reviewedBy, reviewedAt, note
+  testerId, userId          set on approval
 
-testers/{testerId}          accepted testers ONLY, staff-managed
-  requestId, name, email
+users/{authUid}             the account; doc id IS the Firebase Auth uid
+  email, displayName, createdAt
+  friends, friendRequests, lastLogin        owned by the main app, not by us
+  tester        { ... }     <-- the tester record, a nested MAP
+  testerHistory [ { ... } ] <-- past tenures, appended on removal
+
+requestEmails/{sha256(email)}           pending/approved/inactive duplicate marker
+meta/testerCounter                      sequential tester-number counter
+audit/{entryId}                         append-only trail of staff actions
+```
+
+The `tester` map:
+
+```
+  id, requestId, userId, name, email
   status        pending | accepted | rejected | revoked   <-- lifecycle
   appliedAt, acceptedAt, testerNumber
   statusChangedAt, statusChangedBy
   active         <-- the active / not-active flag
   activatedAt, deactivatedAt, deactivatedBy, deactivationReason
-  wallet         { issuerId, classId, accountId, objectId, lastIssuedAt }
+  wallet         { issuerId, classId, accountId, lastIssuedAt }
   activity       { lastPeriod, comments, reviews }
 
-testers/{testerId}/activity/{YYYY-MM}   immutable per-period counts
-requestEmails/{sha256(email)}           pending/approved/inactive duplicate marker
-meta/testerCounter                      sequential tester-number counter
-audit/{entryId}                         append-only trail of staff actions
+users/{authUid}/activity/{YYYY-MM}   immutable per-period counts
 ```
+
+### Why the tester lives on the user document
+
+The tester is not its own document; it is a `tester` map on the account that
+owns it. Three consequences, all deliberate:
+
+- **The identity is the Auth uid.** Approval has to resolve — and where none
+  exists, create — a Firebase account, because that uid is the document key. The
+  dashboard therefore asks for a password when approving someone new, so the
+  applicant ends up with an account they can actually sign in to. Two admins
+  approving the same new applicant at once both lose the create race safely:
+  the loser re-resolves by email rather than creating a second identity.
+- **Writes must be masked.** Lifecycle updates target `tester.<field>`, never the
+  whole document, so a wallet reissue cannot disturb `friends` or `lastLogin`.
+  The Firestore REST body is nested while the updateMask path is dotted, and the
+  two have to agree — sending `{"tester.wallet": …}` instead would create a
+  literal field name containing a dot and silently store nothing.
+- **The roster is a client-side filter.** `active` is nested, so it is not an
+  indexable top-level field. The dashboard lists `users` (staff only) and
+  filters in memory; the two `testers` composite indexes are gone.
+
+### Membership is field existence, not a flag
+
+Removal **moves** the record: the snapshot is appended to `testerHistory` and the
+`tester` map is deleted, in one transaction with the audit entry and the
+duplicate-marker release. A `removed` flag would have been the smaller change,
+but `tester` is a field other code reads, and a flagged-but-present tester still
+reads as "in the programme". Deleting the field makes membership a plain
+`user.tester != null` check with no flag left to drift.
+
+The account itself is **not** deleted, so a former tester can sign in and apply
+again — which takes a fresh number, since the counter is never rewound.
 
 ### Tester status vs. the active flag
 
@@ -42,9 +85,8 @@ Wallet logic already depend on. They are written together and cannot drift:
 | `rejected` | `false` | turned down; no benefits granted |
 | `revoked` | `false` | was accepted, now removed — Wallet pass is REVOKED |
 
-`setTesterActive` is the everyday toggle (accepted <-> revoked);
-`setTesterStatus` covers transitions about the application itself, notably
-`rejected`.
+`setTesterStatus` is the everyday toggle (accepted <-> revoked) and also covers
+transitions about the application itself, notably `rejected`.
 
 ### Sequential tester numbers
 
@@ -56,12 +98,11 @@ one yields a clean 1..25. A number is never reassigned, so a tester keeps theirs
 even if later revoked.
 
 **Why the split.** A request is a transient lead; a tester is a persistent
-program member. Keeping them apart means a query for active testers never drags
-unvetted applicant rows along with it, and an applicant can re-apply without
-disturbing an existing tester record.
+program member. Keeping them apart means the public intake queue never carries
+program state, and an applicant can re-apply without disturbing an existing
+tester record.
 
-**Why `active` is a boolean.** One indexed field, so `where("active", "==", true)`
-is a single cheap query. Deactivation also drives the Google Wallet pass state,
+**Why `active` is a boolean.** Deactivation drives the Google Wallet pass state,
 so an inactive tester receives a `REVOKED` card rather than a live one.
 
 ## Who can write what
@@ -70,9 +111,17 @@ so an inactive tester receives a `REVOKED` card rather than a live one.
 |---|---|---|
 | `requests` create | public visitor | `firestore.rules` — exact field allowlist |
 | `requests` decide | Cloudflare Worker `/accept` | `admin` claim, re-checked in code |
-| `testers` lifecycle | Cloudflare Worker | `allow create, update, delete: if false` for clients |
-| `testers.active` | Cloudflare Worker `/tester-status` | `admin` claim + mandatory reason |
+| `users.tester` lifecycle | Cloudflare Worker | self-updates limited to an app-field allowlist |
+| `users.tester.active` | Cloudflare Worker `/tester-status` | `admin` claim + mandatory reason |
+| Firebase Auth account | Cloudflare Worker `/accept` | `admin` claim; only when no account exists |
 | `audit` | Cloudflare Worker admin routes | `allow write: if false` |
+
+Because the tester record is a nested map on a document the user can otherwise
+update for themselves, the rule that matters is narrower than "clients cannot
+write here": `diff()` compares before and after and rejects any change to a key
+the user does not own. `tests/rules.test.js` proves a tester cannot flip their
+own `active` flag, claim a number, rewrite `testerHistory`, or delete the `tester`
+map to erase the record — while still being able to update `lastLogin`.
 
 The Worker uses Firebase service-account access and therefore **bypasses**
 Firestore rules for admin writes. It verifies the caller's Firebase ID token and
@@ -168,14 +217,15 @@ npm run dev           # static preview on :8900
 ```
 
 `tests/rules.test.js` covers the guarantees that matter: a visitor can create a
-request and nothing else, no client can write `testers`, a tester can read only
-their own record, and the audit trail is unreachable from any client.
+request and nothing else, a user can update their own app fields but never their
+`tester` map, a user can read only their own document, and the audit trail is
+unreachable from any client.
 
 `tests/e2e-signup.js` drives a real browser through the form and asserts the
 document that lands in Firestore, that the email is normalised, that a repeat
-submission is refused, the experience category is stored, and `testers` stays
-empty — the separation guarantee held end to end. The rules tests also exercise
-concurrent submissions and reapplication after rejection.
+submission is refused, the experience category is stored, and no `users` document
+is created — the visitor-facing half of the model is unchanged. The rules tests
+also exercise concurrent submissions and reapplication after rejection.
 
 ## Admin dashboard
 

@@ -3,9 +3,9 @@
  *
  * Replaces the old Formspree POST. The form now writes a document straight to
  * the `requests` collection, which firestore.rules opens to anonymous
- * `create` only. Nothing here touches `testers`: acceptance is a staff action,
- * and the Cloud Function that promotes a request into a tester is the only
- * thing that ever writes there.
+ * `create` only. Nothing here touches `users`: the tester record that approval
+ * creates is a `tester` map on the applicant's user document, written by the
+ * Worker, and the account behind it is created server-side.
  *
  * The page stays fully static — the SDK is loaded from the gstatic CDN as an
  * ES module, so there is no bundler and no build step.

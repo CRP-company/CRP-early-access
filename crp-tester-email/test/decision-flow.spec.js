@@ -94,34 +94,66 @@ function memoryStore(seed = {}) {
         .map(([k, v]) => ({ id: k.split("/").pop(), ...v }));
     },
 
+    /** Merge into `tester.<key>`, mirroring the real masked update. */
+    async patchTester(c, id, patch) {
+      const key = `${c}/${id}`;
+      const cur = docs.get(key);
+      if (!cur) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+      const tester = { ...(cur.tester || {}) };
+      for (const [k, v] of Object.entries(patch)) tester[k] = v;
+      docs.set(key, { ...cur, tester, updateTime: bump() });
+      return true;
+    },
+
     /**
-     * Atomic archive + marker release, mirroring firestore-rest.js.
+     * Atomic move-to-history + marker release, mirroring firestore-rest.js.
      *
      * All-or-nothing on purpose: the whole point of the transaction is that a
      * partial remove is impossible. A stub that applied the writes one at a time
      * would let a broken implementation pass.
+     *
+     * Removal MOVES the tester — the snapshot goes onto `testerHistory` and the
+     * `tester` map is deleted — so "in the programme" stays a field-existence
+     * check with no flag left to drift.
      */
-    async removeTester({
+    async removeTesterToHistory({
       collection,
       id,
-      patch,
-      updateTime,
+      archived,
       auditCollection,
       auditId,
       auditEntry,
       releaseCollection = null,
       releaseId = null,
+      updateTime,
     }) {
       // Staged first, applied only once everything has been validated.
       const staged = [];
       const key = `${collection}/${id}`;
       const cur = docs.get(key);
-      if (!cur || (updateTime && updateTime !== cur.updateTime)) {
+      if (!cur) {
+        const e = new Error("not found");
+        e.status = 404;
+        throw e;
+      }
+      if (updateTime && updateTime !== cur.updateTime) {
         const e = new Error("precondition");
         e.status = 409;
         throw e;
       }
-      staged.push([key, { ...cur, ...patch, updateTime: bump() }]);
+      if (!cur.tester) {
+        return { removed: true, alreadyRemoved: true };
+      }
+
+      const history = Array.isArray(cur.testerHistory) ? cur.testerHistory : [];
+      const next = { ...cur, testerHistory: [...history, archived] };
+      // An explicit null in the updateMask is how a field is deleted.
+      delete next.tester;
+      staged.push([key, { ...next, updateTime: bump() }]);
 
       const aKey = `${auditCollection}/${auditId}`;
       if (docs.has(aKey)) {
@@ -161,6 +193,31 @@ const REQ = (over = {}) => ({
 });
 
 const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
+
+// The Auth layer is stubbed so these tests stay about Firestore behaviour and
+// the emails. An approval resolves — and may create — the applicant's Firebase
+// account, because the tester record is written to `users/{uid}`.
+const authState = { existing: new Map(), created: [] };
+
+vi.mock("../src/user-account.js", async () => {
+  const actual = await vi.importActual("../src/user-account.js");
+  return {
+    ...actual,
+    findUserByEmail: async (_sa, email) =>
+      authState.existing.get(String(email).toLowerCase()) || null,
+    createUser: async (_sa, { email, password, displayName }) => {
+      const user = { uid: `uid-${authState.existing.size + 1}`, email, displayName };
+      authState.existing.set(String(email).toLowerCase(), user);
+      authState.created.push({ email, password });
+      return user;
+    },
+  };
+});
+
+beforeEach(() => {
+  authState.existing = new Map();
+  authState.created = [];
+});
 
 async function markerKey(email) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email));
@@ -234,7 +291,7 @@ describe("REJECTION", () => {
 
     expect(result.status).toBe("rejected");
     expect(store.docs.get("requests/r1").status).toBe("rejected");
-    expect([...store.docs.keys()].some((k) => k.startsWith("testers/"))).toBe(false);
+    expect([...store.docs.keys()].some((k) => k.startsWith("users/"))).toBe(false);
   });
 
   it("does not consume a tester number", async () => {
@@ -284,9 +341,9 @@ describe("REJECTION", () => {
 
     await decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() });
 
-    // No tester doc means no wallet sub-document anywhere.
+    // No user document means no tester map, so no wallet metadata anywhere.
     for (const [key, doc] of store.docs) {
-      if (key.startsWith("testers/")) expect(doc.wallet).toBeUndefined();
+      if (key.startsWith("users/")) expect(doc.tester).toBeUndefined();
     }
   });
 
@@ -477,16 +534,18 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
+      password: "correct horse",
     });
 
     expect(result.status).toBe("approved");
     expect(result.testerId).toBe("t_r1");
     expect(result.testerNumber).toBe(1);
 
-    const tester = store.docs.get("testers/t_r1");
-    expect(tester.status).toBe("accepted");
-    expect(tester.email).toBe("alex@example.com");
-    expect(tester.active).toBe(true);
+    // The tester is a map on the user document, addressed by the Auth uid.
+    const user = store.docs.get(`users/${result.userId}`);
+    expect(user.tester.status).toBe("accepted");
+    expect(user.tester.email).toBe("alex@example.com");
+    expect(user.tester.active).toBe(true);
     expect(store.docs.get("requests/r1").status).toBe("approved");
   });
 
@@ -498,7 +557,13 @@ describe("APPROVAL", () => {
     });
     stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
 
     expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r1");
   });
@@ -512,6 +577,7 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
+      password: "correct horse",
     });
 
     expect(result.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
@@ -551,6 +617,7 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
+      password: "correct horse",
     });
 
     expect(result.emailed).toBe(true);
@@ -571,7 +638,13 @@ describe("APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ() });
     stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
 
     const doc = store.docs.get("requests/r1");
     for (const field of [
@@ -593,9 +666,15 @@ describe("APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ() });
     stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    const result = await decideRequest(store, {
+      requestId: "r1",
+      decision: "approved",
+      ...actor,
+      env: env(),
+      password: "correct horse",
+    });
 
-    const wallet = store.docs.get("testers/t_r1").wallet;
+    const wallet = store.docs.get(`users/${result.userId}`).tester.wallet;
     expect(wallet.issuerId).toBe(ISSUER_ID);
     expect(wallet.classId).toBe(CLASS_ID);
     expect(wallet.accountId).toBe(accountIdFor("t_r1"));
@@ -606,7 +685,13 @@ describe("APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ() });
     const sent = stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
 
     const blob = JSON.stringify(sent[0].body);
     expect(blob).not.toContain("PRIVATE KEY");
@@ -619,8 +704,20 @@ describe("APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ(), "requests/r2": REQ({ email: "b@x.com" }) });
     stubResend();
 
-    const a = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
-    const b = await decideRequest(store, { requestId: "r2", decision: "approved", ...actor, env: env() });
+    const a = await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
+    const b = await decideRequest(store, {
+      requestId: "r2",
+      decision: "approved",
+      ...actor,
+      env: env(),
+      password: "correct horse",
+    });
 
     expect(a.testerNumber).toBe(1);
     expect(b.testerNumber).toBe(2);
@@ -632,30 +729,54 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ() });
     stubResend();
 
-    const first = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    const first = await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
     expect(first.testerNumber).toBe(1);
 
     const counterAfterFirst = counterValue(store);
 
     await expect(
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() }),
+      decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      }),
     ).rejects.toThrow(/already approved/);
 
     // No second number burned, no second tester, counter unchanged.
     expect(counterValue(store)).toBe(counterAfterFirst);
-    const testers = [...store.docs.keys()].filter((k) => k.startsWith("testers/"));
-    expect(testers).toEqual(["testers/t_r1"]);
+    const withTester = [...store.docs.values()].filter((d) => d.tester);
+    expect(withTester).toHaveLength(1);
   });
 
   it("sends no second email when an approval is retried", async () => {
     const store = memoryStore({ "requests/r1": REQ() });
     const sent = stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
     expect(sent).toHaveLength(1);
 
     await expect(
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() }),
+      decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      }),
     ).rejects.toThrow();
 
     expect(sent).toHaveLength(1);
@@ -665,7 +786,13 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
     const store = memoryStore({ "requests/r1": REQ() });
     const sent = stubResend();
 
-    await decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() });
+    await decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      });
 
     // Resend dedupes on this for 24h, so even a retried send is collapsed.
     expect(sent[0].init.headers["Idempotency-Key"]).toBe("application-approved/r1");
@@ -678,10 +805,16 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
     await decideRequest(store, { requestId: "r1", decision: "rejected", ...actor, env: env() });
 
     await expect(
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() }),
+      decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      }),
     ).rejects.toThrow(/already rejected/);
 
-    expect([...store.docs.keys()].some((k) => k.startsWith("testers/"))).toBe(false);
+    expect([...store.docs.keys()].some((k) => k.startsWith("users/"))).toBe(false);
     expect(counterValue(store)).toBeUndefined();
   });
 
@@ -690,14 +823,26 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
     stubResend();
 
     const results = await Promise.allSettled([
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() }),
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: env() }),
+      decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      }),
+      decideRequest(store, {
+        requestId: "r1",
+        decision: "approved",
+        ...actor,
+        env: env(),
+        password: "correct horse",
+      }),
     ]);
 
     const fulfilled = results.filter((r) => r.status === "fulfilled");
     expect(fulfilled).toHaveLength(1);
     expect(counterValue(store)).toBe(1);
-    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toEqual(["testers/t_r1"]);
+    expect([...store.docs.values()].filter((d) => d.tester)).toHaveLength(1);
   });
 });
 
@@ -708,31 +853,31 @@ describe("deactivation requires a reason (setTesterActive parity)", () => {
   // revoked with no record of why.
   it("refuses to deactivate without a reason", async () => {
     const store = memoryStore({
-      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+      "users/u1": { email: "a@b.com", tester: { id: "t1", status: "accepted", active: true, testerNumber: 1 } },
     });
 
     await expect(
-      setTesterStatus(store, { testerId: "t1", active: false, reason: null, ...actor }),
+      setTesterStatus(store, { userId: "u1", active: false, reason: null, ...actor }),
     ).rejects.toThrow(/reason is required when deactivating/i);
   });
 
   it("refuses an empty or whitespace-only reason", async () => {
     const store = memoryStore({
-      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+      "users/u1": { email: "a@b.com", tester: { id: "t1", status: "accepted", active: true, testerNumber: 1 } },
     });
 
     await expect(
-      setTesterStatus(store, { testerId: "t1", active: false, reason: "   ", ...actor }),
+      setTesterStatus(store, { userId: "u1", active: false, reason: "   ", ...actor }),
     ).rejects.toThrow(/reason is required when deactivating/i);
   });
 
   it("deactivates with a reason and keeps status in step with active", async () => {
     const store = memoryStore({
-      "testers/t1": { email: "a@b.com", status: "accepted", testerNumber: 1 },
+      "users/u1": { email: "a@b.com", tester: { id: "t1", status: "accepted", active: true, testerNumber: 1 } },
     });
 
     const result = await setTesterStatus(store, {
-      testerId: "t1",
+      userId: "u1",
       active: false,
       reason: "asked to leave",
       ...actor,
@@ -740,7 +885,7 @@ describe("deactivation requires a reason (setTesterActive parity)", () => {
 
     expect(result.status).toBe("revoked");
     expect(result.active).toBe(false);
-    const doc = store.docs.get("testers/t1");
+    const doc = store.docs.get("users/u1").tester;
     expect(doc.deactivationReason).toBe("asked to leave");
     expect(doc.deactivatedBy).toBe("admin-1");
     // The tester number must survive a revoke.
@@ -751,32 +896,37 @@ describe("deactivation requires a reason (setTesterActive parity)", () => {
     const email = "a@b.com";
     const markerId = await markerKey(email);
     const store = memoryStore({
-      "testers/t1": { email, status: "accepted", active: true, testerNumber: 1 },
+      "users/u1": { email, tester: { id: "t1", status: "accepted", active: true, testerNumber: 1 } },
       [`requestEmails/${markerId}`]: { requestId: "r1" },
     });
 
     await setTesterStatus(store, {
-      testerId: "t1",
+      userId: "u1",
       active: false,
       reason: "inactive",
       ...actor,
     });
 
-    expect(store.docs.get("testers/t1").active).toBe(false);
+    expect(store.docs.get("users/u1").tester.active).toBe(false);
     expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r1");
   });
 
   it("reactivates without needing a reason and burns no number", async () => {
     const store = memoryStore({
-      "testers/t1": {
+      "users/u1": {
         email: "a@b.com",
-        status: "revoked",
-        testerNumber: 1,
-        acceptedAt: "2026-09-01T00:00:00.000Z",
+        tester: {
+          id: "t1",
+          email: "a@b.com",
+          status: "revoked",
+          active: false,
+          testerNumber: 1,
+          acceptedAt: "2026-09-01T00:00:00.000Z",
+        },
       },
     });
 
-    const result = await setTesterStatus(store, { testerId: "t1", active: true, ...actor });
+    const result = await setTesterStatus(store, { userId: "u1", active: true, ...actor });
 
     expect(result.status).toBe("accepted");
     expect(result.active).toBe(true);
@@ -818,7 +968,7 @@ describe("acceptance email content", () => {
   it("uses the same CRP branding as the acknowledgement email", () => {
     const mail = build();
     // Same logo, same footer, same privacy link, table-based layout.
-    expect(mail.html).toContain("i.postimg.cc/K8zf4q4q/CRPlogo.png");
+    expect(mail.html).toContain("github.com/CRP-company/CRP-early-access/blob/main/assets/CRPlogo.png?raw=true");
     expect(mail.html).toContain("&copy;2026 CRP. All rights reserved.");
     expect(mail.html).toContain("crp-company.github.io/CRP-Privacy-policy/");
     expect(mail.html).toContain("<table");
@@ -862,7 +1012,7 @@ describe("rejection email content", () => {
 
   it("matches the CRP branding of the other emails", () => {
     const mail = buildRejectionEmail({ name: "Alex", email: "a@b.com" });
-    expect(mail.html).toContain("i.postimg.cc/K8zf4q4q/CRPlogo.png");
+    expect(mail.html).toContain("github.com/CRP-company/CRP-early-access/blob/main/assets/CRPlogo.png?raw=true");
     expect(mail.html).toContain("&copy;2026 CRP. All rights reserved.");
   });
 });

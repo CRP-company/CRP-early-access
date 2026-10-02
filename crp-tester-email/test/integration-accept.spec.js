@@ -32,6 +32,19 @@ let store;
 let keysDoc;
 let accessTokenCalls = 0;
 let resendCalls = [];
+// The Firebase Auth accounts this run knows about, and the calls made against
+// it. Approving an applicant now genuinely creates an account, so the fake has
+// to hold real state for "does this person already have a CRP account?".
+let authUsers = new Map();
+let authCalls = [];
+
+/**
+ * The password the dashboard would collect when approving.
+ *
+ * Approval creates a CRP account for an applicant who does not have one, so
+ * every approval in this file supplies it.
+ */
+const PW = "correct horse battery";
 let walletKeyPair;
 
 const json = (body, status = 200) =>
@@ -83,6 +96,65 @@ function encodeDocument(doc) {
     fields[k] = encodeValue(v);
   }
   return fields;
+}
+
+/**
+ * Apply a Firestore updateMask to a document.
+ *
+ * Two behaviours matter and neither is a plain merge:
+ *
+ *  - Dotted paths address nested fields. `tester.active` must set one key
+ *    inside the `tester` map and leave the rest of the user document alone.
+ *  - A null value inside the mask DELETES that field. This is how the
+ *    move-to-history removes the `tester` map: there is no "delete field" verb,
+ *    so the field is listed in the mask and sent as a nullValue.
+ */
+function applyMask(current, decoded, mask, updateTime) {
+  // Deep clone: `current` is shared with the store and must not be mutated in
+  // place, or a failed transaction would still have applied its changes.
+  const next = JSON.parse(JSON.stringify(current));
+
+  for (const path of mask) {
+    const parts = path.split(".");
+    const leaf = parts[parts.length - 1];
+
+    // Resolve the value this path names, walking `decoded` in step. A mask entry
+    // is a full path (`tester.wallet`) while the body is nested
+    // (`{tester: {wallet: ...}}`), so the lookup has to descend both.
+    let value = decoded;
+    for (const part of parts) {
+      value =
+        value && typeof value === "object" && part in value ? value[part] : undefined;
+    }
+
+    // Walk to the container that owns the leaf, creating intermediate maps
+    // exactly as Firestore would.
+    let target = next;
+    for (const part of parts.slice(0, -1)) {
+      if (typeof target[part] !== "object" || target[part] === null) target[part] = {};
+      target = target[part];
+    }
+
+    if (value === null) {
+      // Deleting the field. When that empties a nested map, the map itself goes
+      // with it, which is exactly what must happen to `tester` so a removed
+      // tester stops reading as present anywhere in the app.
+      delete target[leaf];
+      continue;
+    }
+
+    if (parts.length === 1) {
+      target[leaf] = value;
+    } else if (typeof value === "object" && value !== null) {
+      // A nested map write replaces the subtree at that path, per Firestore.
+      target[leaf] = { ...(target[leaf] || {}), ...value };
+    } else {
+      target[leaf] = value;
+    }
+  }
+
+  next.updateTime = updateTime;
+  return next;
 }
 
 /** Minimal Firestore REST fake honouring the preconditions the code relies on. */
@@ -146,6 +218,44 @@ function installFirestore() {
       accessTokenCalls += 1;
       return json({ access_token: "stub-access-token", expires_in: 3600 });
     }
+
+    // Firebase Auth admin API. Real: the promotion path genuinely calls this
+    // now, because the tester record is written to `users/{uid}` and that uid
+    // only exists once an Auth account does.
+    if (url === "https://identitytoolkit.googleapis.com/v1/accounts:lookup") {
+      const { email = [] } = JSON.parse(init.body || "{}");
+      const found = email
+        .map((e) => authUsers.get(String(e).toLowerCase()))
+        .filter(Boolean);
+      if (found.length === 0) return json({});
+      return json({ users: found });
+    }
+    if (url === "https://identitytoolkit.googleapis.com/v1/accounts") {
+      const body = JSON.parse(init.body || "{}");
+      const key = String(body.email || "").toLowerCase();
+      if (authUsers.has(key)) {
+        // The real error, so the race-recovery path is genuinely exercised.
+        return json(
+          { error: { code: 400, message: "EMAIL_EXISTS : The email address is already in use." } },
+          400,
+        );
+      }
+      if (!body.password || String(body.password).length < 6) {
+        return json(
+          { error: { code: 400, message: "INVALID_PASSWORD : Password must be at least 6 characters." } },
+          400,
+        );
+      }
+      const user = {
+        localId: `uid-${authUsers.size + 1}`,
+        email: key,
+        displayName: body.displayName,
+        emailVerified: false,
+      };
+      authUsers.set(key, user);
+      authCalls.push({ kind: "create", email: key, password: body.password });
+      return json(user);
+    }
     if (url.startsWith(BASE)) {
       const parsed = new URL(url);
       const body = init.body ? JSON.parse(init.body) : {};
@@ -164,10 +274,14 @@ function installFirestore() {
             if (!current || (expected && current.updateTime !== expected)) {
               return json({ error: { code: 409 } }, 409);
             }
-            staged.push([
-              key,
-              { ...current, ...decodeFields(write.update.fields), updateTime: bump() },
-            ]);
+            const decoded = decodeFields(write.update.fields);
+            // Honour the updateMask the way Firestore does: only the listed
+            // paths change, and a null value in the mask DELETES the field.
+            // `tester` is a nested map on the user document, so both the dotted
+            // paths and the field deletion have to be modelled or the harness
+            // would quietly pass a broken implementation.
+            const mask = write.updateMask?.fieldPaths || Object.keys(decoded);
+            staged.push([key, applyMask(current, decoded, mask, bump())]);
           } else if (write.delete) {
             const key = write.delete.slice(write.delete.indexOf("/documents/") + 11);
             const current = store.docs.get(key);
@@ -222,11 +336,28 @@ function installFirestore() {
             return json({ error: { code: 409, status: "FAILED_PRECONDITION" } }, 409);
           }
         }
-        const res =
-          parsed.searchParams.get("currentDocument.exists") === "false"
-            ? await store.create(c, id, decoded)
-            : await store.update(c, id, decoded);
-        return json({ error: res.status === 409 ? { code: 409 } : undefined }, res.status);
+        if (parsed.searchParams.get("currentDocument.exists") === "false") {
+          const res = await store.create(c, id, decoded);
+          return json({ error: res.status === 409 ? { code: 409 } : undefined }, res.status);
+        }
+        // Masked update, honouring dotted paths: `tester.wallet` must write one
+        // nested key without disturbing the rest of the user document.
+        //
+        // getAll, not get: updateDocument appends one `updateMask.fieldPaths`
+        // parameter PER FIELD, and get() returns only the first. Reading it that
+        // way silently drops every field after the first, which is exactly the
+        // kind of harness bug that looks like a production failure.
+        const mask = parsed.searchParams
+          .getAll("updateMask.fieldPaths")
+          .flatMap((v) => v.split(","))
+          .filter(Boolean);
+        const cur = await store.get(c, id);
+        if (!cur) return json({ error: { code: 404 } }, 404);
+        store.docs.set(
+          `${c}/${id}`,
+          applyMask(cur, decoded, mask.length ? mask : Object.keys(decoded), bump()),
+        );
+        return json({});
       }
 
       // Collection listing, used to spot an existing tester with the same email.
@@ -347,6 +478,8 @@ beforeEach(async () => {
   __resetTokenCache();
   accessTokenCalls = 0;
   resendCalls = [];
+  authUsers = new Map();
+  authCalls = [];
 
   // A genuine signing key, so getAccessToken() exercises real JWT signing.
   serviceAccountJson = JSON.stringify({
@@ -391,6 +524,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
       token,
       requestId: "r1",
       decision: "approved",
+      password: "correct horse battery",
     });
 
     expect(result.ok).toBe(true);
@@ -399,9 +533,13 @@ describe("Admin Dashboard -> Worker /accept", () => {
     const req = store.docs.get("requests/r1");
     expect(req.status).toBe("approved");
     expect(req.testerId).toBe(result.testerId);
+    expect(req.userId).toBe(result.userId);
     expect(req.reviewedBy).toBe("admin-uid");
 
-    const tester = store.docs.get(`testers/${result.testerId}`);
+    // The tester is a MAP on the user document, addressed by the Auth uid.
+    const user = store.docs.get(`users/${result.userId}`);
+    expect(user).toBeDefined();
+    const tester = user.tester;
     expect(tester.status).toBe("accepted");
     expect(tester.active).toBe(true);
     expect(tester.testerNumber).toBe(1);
@@ -412,6 +550,107 @@ describe("Admin Dashboard -> Worker /accept", () => {
     // The sequential counter advanced.
     expect(store.docs.get("meta/testerCounter").lastNumber).toBe(1);
     expect([...store.docs.keys()].filter((k) => k.startsWith("audit/")).length).toBeGreaterThan(0);
+  });
+
+  it("creates the Auth account, so the applicant can sign in to the app", async () => {
+    const token = await mintAdminToken();
+    const result = await decideViaWorker({
+      url: `${WORKER_ORIGIN}/accept`,
+      token,
+      requestId: "r1",
+      decision: "approved",
+      password: "correct horse battery",
+    });
+
+    // A real account was created, with the admin's password and the request's
+    // name, and the tester record is keyed by the uid Firebase issued.
+    expect(result.accountCreated).toBe(true);
+    expect(authCalls).toEqual([
+      { kind: "create", email: "alex@example.com", password: "correct horse battery" },
+    ]);
+    const account = authUsers.get("alex@example.com");
+    expect(account.localId).toBe(result.userId);
+    expect(account.displayName).toBe("Alex Morgan");
+    // Deliberately NOT verified: acceptance is a staff decision, not proof the
+    // applicant controls the mailbox.
+    expect(account.emailVerified).toBe(false);
+  });
+
+  it("refuses an approval with no password when the account does not exist", async () => {
+    const token = await mintAdminToken();
+    // Deliberately no password: the account does not exist, so one is required.
+    await expect(
+      decideViaWorker({
+        url: `${WORKER_ORIGIN}/accept`,
+        token,
+        requestId: "r1",
+        decision: "approved",
+      }),
+    ).rejects.toThrow(/no CRP account yet/i);
+
+    // Nothing was created and no number burned, so the admin can retry.
+    expect(authCalls).toHaveLength(0);
+    expect(store.docs.get("meta/testerCounter")).toBeUndefined();
+    expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toHaveLength(0);
+  });
+
+  it("reuses an existing account and does not create a second one", async () => {
+    // The person already signed up in the main app, so no account is needed —
+    // the password is ignored rather than used to overwrite their existing one.
+    authUsers.set("alex@example.com", {
+      localId: "uid-existing",
+      email: "alex@example.com",
+      displayName: "Alex M",
+    });
+
+    const token = await mintAdminToken();
+    const result = await decideViaWorker({
+      url: `${WORKER_ORIGIN}/accept`,
+      token,
+      requestId: "r1",
+      decision: "approved",
+      password: "ignored entirely",
+    });
+
+    expect(result.userId).toBe("uid-existing");
+    expect(result.accountCreated).toBe(false);
+    expect(authCalls).toHaveLength(0);
+    expect(store.docs.get("users/uid-existing").tester.testerNumber).toBe(1);
+  });
+
+  it("does not clobber the user's other fields when promoting them", async () => {
+    // The user document is shared with the main app, so this is the field that
+    // matters most: a wallet reissue or a status change must not rewrite them.
+    authUsers.set("alex@example.com", {
+      localId: "uid-existing",
+      email: "alex@example.com",
+      displayName: "Alex M",
+    });
+    store.docs.set("users/uid-existing", {
+      email: "alex@example.com",
+      displayName: "Alex M",
+      friends: ["f1", "f2"],
+      friendRequests: ["f3"],
+      lastLogin: "2026-09-30T14:57:01.000Z",
+    });
+
+    const token = await mintAdminToken();
+    await decideViaWorker({
+      url: `${WORKER_ORIGIN}/accept`,
+      token,
+      requestId: "r1",
+      decision: "approved",
+      password: PW,
+    });
+
+    const user = store.docs.get("users/uid-existing");
+    expect(user.friends).toEqual(["f1", "f2"]);
+    expect(user.friendRequests).toEqual(["f3"]);
+    expect(user.lastLogin).toBe("2026-09-30T14:57:01.000Z");
+    expect(user.displayName).toBe("Alex M");
+    // ...and the tester map is there alongside them.
+    expect(user.tester.testerNumber).toBe(1);
+    expect(user.tester.wallet.lastIssuedAt).toBeTruthy();
   });
 
   it("sends the ID token in the Authorization header", async () => {
@@ -428,6 +667,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
       token,
       requestId: "r1",
       decision: "approved",
+      password: PW,
     });
 
     expect(seen).toHaveLength(1);
@@ -451,6 +691,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
           token,
           requestId: id,
           decision: "approved",
+          password: PW,
         }),
       ),
     );
@@ -467,6 +708,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
         token,
         requestId: id,
         decision: "approved",
+          password: PW,
       });
 
     store.docs.set("requests/r2", { name: "B", email: "b@example.com", status: "pending" });
@@ -488,7 +730,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
     });
 
     expect(store.docs.get("requests/r1").status).toBe("rejected");
-    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toHaveLength(0);
+    expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toHaveLength(0);
     expect(store.docs.get("meta/testerCounter")).toBeUndefined();
   });
 
@@ -501,6 +743,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
         token,
         requestId: "r1",
         decision: "approved",
+          password: PW,
       }),
     ).rejects.toThrow(/already approved/i);
   });
@@ -538,7 +781,7 @@ describe("Admin Dashboard -> Worker /accept — refusals", () => {
     expect(res.status).toBe(401);
     // Nothing written: the check runs before any Firestore call.
     expect(store.docs.get("requests/r1").status).toBe("pending");
-    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toHaveLength(0);
+    expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toHaveLength(0);
   });
 
   it("403s a validly signed token that lacks the admin claim", async () => {
@@ -553,7 +796,7 @@ describe("Admin Dashboard -> Worker /accept — refusals", () => {
     const res = await post(await mintAdminToken({}, { kid: "unknown-kid" }));
     expect([401, 403]).toContain(res.status);
     expect(store.docs.get("requests/r1").status).toBe("pending");
-    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toHaveLength(0);
+    expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toHaveLength(0);
   });
 
   it("403s a disallowed origin even with a valid token", async () => {
@@ -623,7 +866,7 @@ describe("Admin Dashboard -> Worker /accept — rejection", () => {
     expect(request.reviewedBy).toBe("admin-uid");
 
     // No tester, and no tester number consumed.
-    expect(await store.list("testers")).toHaveLength(0);
+    expect(await store.list("users")).toHaveLength(0);
     expect(await store.get("meta", "testerCounter")).toBeNull();
   });
 
@@ -641,7 +884,7 @@ describe("Admin Dashboard -> Worker /accept — rejection", () => {
 describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("creates the tester, allocates a number, and emails with the Wallet link", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -650,11 +893,15 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
     expect(body.testerNumber).toBe(1);
     expect(body.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
 
-    const tester = await store.get("testers", "t_r1");
-    expect(tester.status).toBe("accepted");
-    expect(tester.active).toBe(true);
-    expect(tester.testerNumber).toBe(1);
-    expect(tester.wallet.classId).toBe("3388000000023210330.crp_tester_loyalty");
+    // The tester is a map on the user document, addressed by the Auth uid.
+    const user = await store.get("users", body.userId);
+    expect(user.tester.status).toBe("accepted");
+    expect(user.tester.active).toBe(true);
+    expect(user.tester.testerNumber).toBe(1);
+    expect(user.tester.wallet.classId).toBe("3388000000023210330.crp_tester_loyalty");
+    // And the user document carries the fields this project owns.
+    expect(user.email).toBe("alex@example.com");
+    expect(user.displayName).toBe("Alex Morgan");
 
     // Request fields preserved, tester linked.
     const request = await store.get("requests", "r1");
@@ -663,11 +910,12 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
     expect(request.createdAt).toBe("2026-09-01T00:00:00.000Z");
     expect(request.status).toBe("approved");
     expect(request.testerId).toBe("t_r1");
+    expect(request.userId).toBe(body.userId);
   });
 
   it("signs the Wallet pass with the crp-tester-card key, not the Firebase one", async () => {
     const adminToken = await mintAdminToken();
-    const res = await postAccept(adminToken, { requestId: "r1", decision: "approved" });
+    const res = await postAccept(adminToken, { requestId: "r1", decision: "approved", password: PW });
     const { saveUrl } = await res.json();
 
     const parts = saveUrl.split("/").pop().split(".");
@@ -689,7 +937,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
 
   it("sends an acceptance email carrying the number and the Wallet link", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
     const { saveUrl } = await res.json();
 
     expect(resendCalls).toHaveLength(1);
@@ -703,7 +951,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
 
   it("leaks no credential in the response or the email", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
     const responseText = await res.text();
     const mail = JSON.stringify(resendCalls[0].body);
 
@@ -716,14 +964,14 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("refuses a retried approval without a second tester, number or email", async () => {
     const token = await mintAdminToken();
 
-    const first = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const first = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
     expect(first.status).toBe(200);
     expect(resendCalls).toHaveLength(1);
 
-    const second = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const second = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
     expect(second.status).toBe(409);
 
-    expect(await store.list("testers")).toHaveLength(1);
+    expect(await store.list("users")).toHaveLength(1);
     expect((await store.get("meta", "testerCounter")).lastNumber).toBe(1);
     expect(resendCalls).toHaveLength(1);
   });
@@ -731,7 +979,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("does not burn a number when a rejected request is later approved", async () => {
     const token = await mintAdminToken();
     await postAccept(token, { requestId: "r1", decision: "rejected" });
-    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
 
     expect(res.status).toBe(409);
     expect(await store.get("meta", "testerCounter")).toBeNull();
@@ -753,32 +1001,56 @@ describe("Admin Dashboard -> Worker /tester-wallet", () => {
       env,
     );
 
+  // The tester is a map on the user document, so the wallet route is addressed
+  // by Auth uid. The `t_r1` id lives inside the map and is what the Wallet
+  // object id is still derived from.
   const seedTester = (over = {}) =>
-    store.docs.set("testers/t_r1", {
-      requestId: "r1",
-      name: "Alex Morgan",
+    store.docs.set("users/uid-1", {
       email: "alex@example.com",
-      status: "accepted",
-      active: true,
-      testerNumber: 1,
-      ...over,
+      friends: ["f1"],
+      tester: {
+        id: "t_r1",
+        requestId: "r1",
+        name: "Alex Morgan",
+        email: "alex@example.com",
+        status: "accepted",
+        active: true,
+        testerNumber: 1,
+        ...over,
+      },
     });
 
   it("replaces the undeployed issueWalletPass Cloud Function", async () => {
     seedTester();
     const token = await mintAdminToken();
-    const res = await postWallet(token, { testerId: "t_r1" });
+    const res = await postWallet(token, { userId: "uid-1" });
 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
     expect(body.active).toBe(true);
+    expect(body.testerId).toBe("t_r1");
+  });
+
+  it("writes only tester.wallet, leaving the user's other fields alone", async () => {
+    seedTester();
+    const token = await mintAdminToken();
+    await postWallet(token, { userId: "uid-1" });
+
+    const user = store.docs.get("users/uid-1");
+    // The masked path is the whole point: a wallet reissue must not rewrite the
+    // rest of a document the main app also owns.
+    expect(user.friends).toEqual(["f1"]);
+    expect(user.email).toBe("alex@example.com");
+    expect(user.tester.testerNumber).toBe(1);
+    expect(user.tester.wallet.lastIssuedAt).toBeTruthy();
+    expect(user.tester.wallet.accountId).toBe("CRP-R1");
   });
 
   it("signs with the Wallet key and the existing tester number", async () => {
     seedTester();
     const token = await mintAdminToken();
-    const res = await postWallet(token, { testerId: "t_r1" });
+    const res = await postWallet(token, { userId: "uid-1" });
     const { saveUrl } = await res.json();
 
     const [header, payload, signature] = saveUrl.split("/").pop().split(".");
@@ -798,23 +1070,24 @@ describe("Admin Dashboard -> Worker /tester-wallet", () => {
   it("issues the SAME Wallet object, so no second pass is created", async () => {
     seedTester();
     const token = await mintAdminToken();
-    const first = await (await postWallet(token, { testerId: "t_r1" })).json();
-    const second = await (await postWallet(token, { testerId: "t_r1" })).json();
+    const first = await (await postWallet(token, { userId: "uid-1" })).json();
+    const second = await (await postWallet(token, { userId: "uid-1" })).json();
 
     const objectId = (u) =>
       JSON.parse(Buffer.from(u.split("/").pop().split(".")[1], "base64url").toString())
         .payload.loyaltyObjects[0].id;
 
-    // Derived from the tester document id, so a reissue updates one object.
+    // Derived from the tester id stored inside the map, so a reissue updates one
+    // object — the restructure does not mint a second pass for existing testers.
     expect(objectId(first.saveUrl)).toBe(objectId(second.saveUrl));
     expect(objectId(first.saveUrl)).toBe("3388000000023210330.crp_tester_loyalty_t_r1");
-    expect([...store.docs.keys()].filter((k) => k.startsWith("testers/"))).toEqual(["testers/t_r1"]);
+    expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toEqual(["users/uid-1"]);
   });
 
   it("issues a REVOKED card for an inactive tester", async () => {
     seedTester({ status: "revoked", active: false });
     const token = await mintAdminToken();
-    const res = await postWallet(token, { testerId: "t_r1" });
+    const res = await postWallet(token, { userId: "uid-1" });
     const { saveUrl, active } = await res.json();
 
     expect(active).toBe(false);
@@ -822,18 +1095,26 @@ describe("Admin Dashboard -> Worker /tester-wallet", () => {
     expect(claims.payload.loyaltyObjects[0].state).toBe("REVOKED");
   });
 
+  it("404s a user who is not a tester", async () => {
+    // Removed from the programme: no `tester` map, so there is no card to issue.
+    store.docs.set("users/uid-1", { email: "alex@example.com", testerHistory: [] });
+    const token = await mintAdminToken();
+    const res = await postWallet(token, { userId: "uid-1" });
+    expect(res.status).toBe(404);
+  });
+
   it("requires the admin claim", async () => {
     seedTester();
     // A valid token that is not staff.
     const nonAdmin = await mintAdminToken({ admin: false });
-    const res = await postWallet(nonAdmin, { testerId: "t_r1" });
+    const res = await postWallet(nonAdmin, { userId: "uid-1" });
     expect(res.status).toBe(403);
 
     const anon = await worker.fetch(
       new Request(`${WORKER_ORIGIN}/tester-wallet`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Origin: ORIGIN },
-        body: JSON.stringify({ testerId: "t_r1" }),
+        body: JSON.stringify({ userId: "uid-1" }),
       }),
       env,
     );
@@ -852,13 +1133,13 @@ describe("Admin Dashboard -> Worker /tester-wallet", () => {
           Origin: "https://evil.example",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ testerId: "t_r1" }),
+        body: JSON.stringify({ userId: "uid-1" }),
       }),
       env,
     );
     expect(wrongOrigin.status).toBe(403);
 
-    const missing = await postWallet(token, { testerId: "does-not-exist" });
+    const missing = await postWallet(token, { userId: "does-not-exist" });
     expect(missing.status).toBe(404);
   });
 

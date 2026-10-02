@@ -1,11 +1,41 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { decideRequest, setTesterStatus, AcceptError } from "../src/accept.js";
-import { STATUS, META_COLLECTION, COUNTER_DOC } from "../src/tester-lifecycle.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// The Auth layer is stubbed so these tests exercise Firestore behaviour rather
+// than the Identity Toolkit. user-account.spec.js covers the account creation
+// itself, and the integration suite exercises the real fetch path end to end.
+const authState = { existing: new Map(), created: [], emailTaken: new Set() };
+
+vi.mock("../src/user-account.js", async () => {
+  const actual = await vi.importActual("../src/user-account.js");
+  return {
+    ...actual,
+    findUserByEmail: async (_sa, email) =>
+      authState.existing.get(String(email).toLowerCase()) || null,
+    createUser: async (_sa, { email, password, displayName }) => {
+      const key = String(email).toLowerCase();
+      if (authState.emailTaken.has(key)) {
+        const e = new actual.UserAccountError(400, "The email address is already in use.");
+        throw e;
+      }
+      const user = { uid: `uid-${authState.existing.size + 1}`, email: key, displayName };
+      authState.existing.set(key, user);
+      authState.created.push({ email: key, password });
+      return user;
+    },
+  };
+});
+
+const { decideRequest, setTesterStatus, AcceptError } = await import("../src/accept.js");
+const { STATUS, META_COLLECTION, COUNTER_DOC } = await import("../src/tester-lifecycle.js");
 
 /**
  * In-memory Firestore modelling the REST preconditions that matter:
  * create-if-absent (409) and versioned update (409 when the doc changed).
  * Deliberately does not serialise, so concurrency is genuinely interleaved.
+ *
+ * `patchTester` is the dotted-path update the `tester` map needs: it merges into
+ * the nested map rather than replacing the user document, which is what stops a
+ * lifecycle write from clobbering `friends` / `lastLogin`.
  */
 function memoryStore(seed = {}) {
   const docs = new Map();
@@ -40,6 +70,20 @@ function memoryStore(seed = {}) {
       docs.set(key, { ...cur, ...data, updateTime: bump() });
       return true;
     },
+    /** Merge into `tester.<key>`, matching the real updateMask behaviour. */
+    async patchTester(c, id, patch) {
+      const key = `${c}/${id}`;
+      const cur = docs.get(key);
+      if (!cur) {
+        const e = new Error("precondition");
+        e.status = 409;
+        throw e;
+      }
+      const tester = { ...(cur.tester || {}) };
+      for (const [k, v] of Object.entries(patch)) tester[k] = v;
+      docs.set(key, { ...cur, tester, updateTime: bump() });
+      return true;
+    },
     async rejectRequestAndReleaseMarker({ requestId, requestUpdateTime, patch, markerCollection, markerId }) {
       const requestKey = `requests/${requestId}`;
       const request = docs.get(requestKey);
@@ -71,8 +115,23 @@ const REQ = (over = {}) => ({
 });
 
 const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
+const ENV = { FIREBASE_SERVICE_ACCOUNT_JSON: "{}" };
+/** Approval payload: the password is only needed when no account exists. */
+const approve = { ...actor, env: ENV, password: "correct horse" };
+
 const counterValue = (s) => s.docs.get(`${META_COLLECTION}/${COUNTER_DOC}`)?.lastNumber;
-const testerKeys = (s) => [...s.docs.keys()].filter((k) => k.startsWith("testers/"));
+const userKeys = (s) => [...s.docs.keys()].filter((k) => k.startsWith("users/"));
+/** Every user document that currently has a `tester` map. */
+const withTester = (s) =>
+  [...s.docs.entries()]
+    .filter(([k, v]) => k.startsWith("users/") && v.tester)
+    .map(([, v]) => v.tester);
+
+beforeEach(() => {
+  authState.existing = new Map();
+  authState.created = [];
+  authState.emailTaken = new Set();
+});
 
 describe("decideRequest — rejection", () => {
   let store;
@@ -85,7 +144,16 @@ describe("decideRequest — rejection", () => {
     expect(res.status).toBe("rejected");
     expect(store.docs.get("requests/r1").status).toBe("rejected");
     expect(store.docs.get("requests/r1").reviewedBy).toBe("admin-1");
-    expect(testerKeys(store)).toHaveLength(0);
+    // A rejection must not create a user document or an account.
+    expect(userKeys(store)).toHaveLength(0);
+    expect(withTester(store)).toHaveLength(0);
+  });
+
+  it("creates no account, so no password is needed", async () => {
+    // The password is only consulted on approval. A rejection must not fail
+    // because the admin did not supply one.
+    await decideRequest(store, { requestId: "r1", decision: "rejected", env: ENV, ...actor });
+    expect(authState.created).toHaveLength(0);
   });
 
   it("burns no tester number", async () => {
@@ -108,12 +176,15 @@ describe("decideRequest — approval", () => {
   });
 
   it("creates the tester with accepted status and a number", async () => {
-    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor });
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
 
     expect(res.status).toBe("approved");
     expect(res.testerNumber).toBe(1);
 
-    const t = store.docs.get(`testers/${res.testerId}`);
+    // The tester is a MAP on the user document, addressed by the Auth uid.
+    const user = store.docs.get(`users/${res.userId}`);
+    expect(user).toBeDefined();
+    const t = user.tester;
     expect(t.status).toBe(STATUS.ACCEPTED);
     expect(t.active).toBe(true);
     expect(t.testerNumber).toBe(1);
@@ -122,11 +193,77 @@ describe("decideRequest — approval", () => {
     expect(t.acceptedAt).toBeTruthy();
   });
 
+  it("records the uid and the t_ id inside the tester map", async () => {
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+    const t = store.docs.get(`users/${res.userId}`).tester;
+    expect(t.userId).toBe(res.userId);
+    // The t_ id survives inside the map, which is what keeps Wallet object ids
+    // and CRP-XXXX account ids stable across the restructure.
+    expect(t.id).toBe(res.testerId);
+  });
+
+  it("creates the Firebase account when the applicant has none", async () => {
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+    expect(res.accountCreated).toBe(true);
+    expect(authState.created).toEqual([
+      { email: "alex@example.com", password: "correct horse" },
+    ]);
+    expect(res.userId).toBe(authState.existing.get("alex@example.com").uid);
+  });
+
+  it("refuses to approve without a password when no account exists", async () => {
+    // The tester map needs a uid, so an account must exist first. Failing here
+    // is better than burning a tester number for an applicant with no account.
+    await expect(
+      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: ENV }),
+    ).rejects.toMatchObject({ status: 400 });
+    // And nothing was written — no number burned, no stray user document.
+    expect(userKeys(store)).toHaveLength(0);
+    expect(counterValue(store)).toBeUndefined();
+  });
+
+  it("reuses an existing account and does not create a second one", async () => {
+    authState.existing.set("alex@example.com", {
+      uid: "uid-existing", email: "alex@example.com", displayName: "Alex",
+    });
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+
+    expect(res.userId).toBe("uid-existing");
+    expect(res.accountCreated).toBe(false);
+    // The password the admin typed is simply unused when an account exists.
+    expect(authState.created).toHaveLength(0);
+    expect(store.docs.get("users/uid-existing").tester).toBeDefined();
+  });
+
+  it("does not clobber the user's other fields", async () => {
+    // The user document is shared with the main app. An approval must add
+    // `tester` and leave friends / lastLogin / displayName exactly as they were.
+    authState.existing.set("alex@example.com", {
+      uid: "uid-existing", email: "alex@example.com", displayName: "Alex",
+    });
+    store.docs.set("users/uid-existing", {
+      email: "alex@example.com",
+      displayName: "Alex",
+      friends: ["a", "b"],
+      lastLogin: "2026-09-30T00:00:00.000Z",
+    });
+
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+
+    const user = store.docs.get("users/uid-existing");
+    expect(user.friends).toEqual(["a", "b"]);
+    expect(user.lastLogin).toBe("2026-09-30T00:00:00.000Z");
+    expect(user.displayName).toBe("Alex");
+    expect(user.tester.testerNumber).toBe(1);
+    expect(res.userId).toBe("uid-existing");
+  });
+
   it("sets request status and links the tester", async () => {
-    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor });
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
     const req = store.docs.get("requests/r1");
     expect(req.status).toBe("approved");
     expect(req.testerId).toBe(res.testerId);
+    expect(req.userId).toBe(res.userId);
     expect(req.reviewedAt).toBeTruthy();
   });
 
@@ -134,9 +271,9 @@ describe("decideRequest — approval", () => {
     store.docs.set("requests/r2", REQ({ email: "b@example.com" }));
     store.docs.set("requests/r3", REQ({ email: "c@example.com" }));
 
-    const n1 = (await decideRequest(store, { requestId: "r1", decision: "approved", ...actor })).testerNumber;
-    const n2 = (await decideRequest(store, { requestId: "r2", decision: "approved", ...actor })).testerNumber;
-    const n3 = (await decideRequest(store, { requestId: "r3", decision: "approved", ...actor })).testerNumber;
+    const n1 = (await decideRequest(store, { requestId: "r1", decision: "approved", ...approve })).testerNumber;
+    const n2 = (await decideRequest(store, { requestId: "r2", decision: "approved", ...approve })).testerNumber;
+    const n3 = (await decideRequest(store, { requestId: "r3", decision: "approved", ...approve })).testerNumber;
 
     expect([n1, n2, n3]).toEqual([1, 2, 3]);
   });
@@ -145,28 +282,43 @@ describe("decideRequest — approval", () => {
     for (let i = 0; i < 5; i += 1) store.docs.set(`requests/c${i}`, REQ({ email: `c${i}@example.com` }));
     const results = await Promise.all(
       Array.from({ length: 5 }, (_, i) =>
-        decideRequest(store, { requestId: `c${i}`, decision: "approved", ...actor }),
+        decideRequest(store, { requestId: `c${i}`, decision: "approved", ...approve }),
       ),
     );
     expect(results.map((r) => r.testerNumber).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("reuses the existing number when re-approving", async () => {
-    const first = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor });
+    const first = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
     store.docs.get("requests/r1").status = "pending";
-    const second = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor });
+    const second = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
 
+    // Already a tester on this account, so the number and the record stand.
     expect(second.testerNumber).toBe(first.testerNumber);
     expect(counterValue(store)).toBe(1);
   });
 
   it("links to an existing tester rather than duplicating", async () => {
-    store.docs.set("testers/t_other", {
-      email: "alex@example.com", status: STATUS.ACCEPTED, active: true,
+    // Already a tester on this account. Re-applying must reuse the record.
+    authState.existing.set("alex@example.com", {
+      uid: "uid-existing", email: "alex@example.com", displayName: "Alex",
     });
-    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...actor });
+    store.docs.set("users/uid-existing", {
+      email: "alex@example.com",
+      tester: {
+        id: "t_other", email: "alex@example.com", testerNumber: 3,
+        status: STATUS.ACCEPTED, active: true,
+      },
+    });
+
+    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+
     expect(res.testerId).toBe("t_other");
-    expect(testerKeys(store)).toHaveLength(1);
+    expect(res.testerNumber).toBe(3);
+    // Exactly one tester map across the whole collection — no second record.
+    expect(withTester(store)).toHaveLength(1);
+    // And no number burned for a re-application.
+    expect(counterValue(store)).toBeUndefined();
   });
 });
 
@@ -194,7 +346,10 @@ describe("decideRequest — guards", () => {
 });
 
 describe("setTesterStatus", () => {
+  // The tester is a map on the user document, so every fixture is a user
+  // document and every call is addressed by uid.
   const accepted = (over = {}) => ({
+    id: "t1",
     email: "alex@example.com",
     status: STATUS.ACCEPTED,
     active: true,
@@ -202,24 +357,25 @@ describe("setTesterStatus", () => {
     acceptedAt: "2026-09-01T00:00:00.000Z",
     ...over,
   });
+  const withTester = (tester) => ({ "users/u1": { email: "alex@example.com", tester } });
 
   it("revoking flips status and active together", async () => {
-    const store = memoryStore({ "testers/t1": accepted() });
+    const store = memoryStore(withTester(accepted()));
     const res = await setTesterStatus(store, {
-      testerId: "t1", active: false, reason: "inactive", ...actor,
+      userId: "u1", active: false, reason: "inactive", ...actor,
     });
 
     expect(res.status).toBe(STATUS.REVOKED);
-    const t = store.docs.get("testers/t1");
+    const t = store.docs.get("users/u1").tester;
     expect(t.active).toBe(false);
     expect(t.deactivationReason).toBe("inactive");
   });
 
   it("reactivating keeps the original acceptedAt", async () => {
-    const store = memoryStore({ "testers/t1": accepted({ status: STATUS.REVOKED, active: false }) });
-    await setTesterStatus(store, { testerId: "t1", status: STATUS.ACCEPTED, ...actor });
+    const store = memoryStore(withTester(accepted({ status: STATUS.REVOKED, active: false })));
+    await setTesterStatus(store, { userId: "u1", status: STATUS.ACCEPTED, ...actor });
 
-    const t = store.docs.get("testers/t1");
+    const t = store.docs.get("users/u1").tester;
     expect(t.status).toBe(STATUS.ACCEPTED);
     expect(t.active).toBe(true);
     // Must not rewrite when they originally joined.
@@ -228,38 +384,69 @@ describe("setTesterStatus", () => {
   });
 
   it("keeps the tester number through every transition", async () => {
-    const store = memoryStore({ "testers/t1": accepted() });
-    await setTesterStatus(store, { testerId: "t1", status: STATUS.REVOKED, reason: "x", ...actor });
-    await setTesterStatus(store, { testerId: "t1", status: STATUS.ACCEPTED, ...actor });
-    await setTesterStatus(store, { testerId: "t1", status: STATUS.REJECTED, reason: "y", ...actor });
-    expect(store.docs.get("testers/t1").testerNumber).toBe(7);
+    const store = memoryStore(withTester(accepted()));
+    await setTesterStatus(store, { userId: "u1", status: STATUS.REVOKED, reason: "x", ...actor });
+    await setTesterStatus(store, { userId: "u1", status: STATUS.ACCEPTED, ...actor });
+    await setTesterStatus(store, { userId: "u1", status: STATUS.REJECTED, reason: "y", ...actor });
+    expect(store.docs.get("users/u1").tester.testerNumber).toBe(7);
+  });
+
+  it("leaves the user's other fields untouched", async () => {
+    // The dotted-path patch is what makes this safe: a status change must not
+    // rewrite friends / lastLogin on a document the main app also owns.
+    const store = memoryStore({
+      "users/u1": {
+        email: "alex@example.com",
+        friends: ["a", "b"],
+        lastLogin: "2026-09-30T00:00:00.000Z",
+        tester: accepted(),
+      },
+    });
+
+    await setTesterStatus(store, { userId: "u1", active: false, reason: "inactive", ...actor });
+
+    const user = store.docs.get("users/u1");
+    expect(user.friends).toEqual(["a", "b"]);
+    expect(user.lastLogin).toBe("2026-09-30T00:00:00.000Z");
+    expect(user.tester.active).toBe(false);
   });
 
   it("requires a reason to reject", async () => {
-    const store = memoryStore({ "testers/t1": accepted() });
+    const store = memoryStore(withTester(accepted()));
     await expect(
-      setTesterStatus(store, { testerId: "t1", status: STATUS.REJECTED, ...actor }),
+      setTesterStatus(store, { userId: "u1", status: STATUS.REJECTED, ...actor }),
     ).rejects.toMatchObject({ status: 400 });
   });
 
   it("rejects an unknown status", async () => {
-    const store = memoryStore({ "testers/t1": accepted() });
+    const store = memoryStore(withTester(accepted()));
     await expect(
-      setTesterStatus(store, { testerId: "t1", status: "banished", ...actor }),
+      setTesterStatus(store, { userId: "u1", status: "banished", ...actor }),
     ).rejects.toMatchObject({ status: 400 });
   });
 
   it("refuses a no-op transition", async () => {
-    const store = memoryStore({ "testers/t1": accepted() });
+    const store = memoryStore(withTester(accepted()));
     await expect(
-      setTesterStatus(store, { testerId: "t1", status: STATUS.ACCEPTED, ...actor }),
+      setTesterStatus(store, { userId: "u1", status: STATUS.ACCEPTED, ...actor }),
     ).rejects.toMatchObject({ status: 409 });
   });
 
-  it("404s an unknown tester", async () => {
+  it("404s a user who is not a tester", async () => {
+    // Present, but no `tester` map: removed from the programme. This is a
+    // different situation from a bad id, and must not silently recreate anyone.
+    const store = memoryStore({ "users/u1": { email: "alex@example.com", testerHistory: [] } });
+    await expect(
+      setTesterStatus(store, { userId: "u1", status: STATUS.ACCEPTED, ...actor }),
+    ).rejects.toMatchObject({ status: 404 });
+    // And the removed person is not quietly put back on the roster.
+    expect(store.docs.get("users/u1").tester).toBeUndefined();
+  });
+
+  it("404s an unknown user", async () => {
     const store = memoryStore();
     await expect(
-      setTesterStatus(store, { testerId: "nope", status: STATUS.ACCEPTED, ...actor }),
+      setTesterStatus(store, { userId: "nope", status: STATUS.ACCEPTED, ...actor }),
     ).rejects.toMatchObject({ status: 404 });
   });
 });
