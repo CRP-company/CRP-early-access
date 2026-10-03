@@ -648,10 +648,36 @@ export function createFirestore(secretJson, projectId) {
     }
   }
 
+  /**
+   * Delete a document.
+   *
+   * Needed by the tester-removal path, which drops the portal pointer so a
+   * removed tester stops resolving. The pointer is genuinely removed rather than
+   * blanked: leaving a document behind with no userId turns a clean "not on the
+   * roster" answer into the 409 "your tester record needs migrating", because
+   * findTesterByEmail() only skips a pointer that is absent.
+   *
+   * A 404 is surfaced as `status: 404` on the thrown error, so callers can treat
+   * "already gone" as success without a pre-read.
+   */
+  async function deleteDocument(collection, id) {
+    const res = await fetch(pathUrl(`${collection}/${id}`), {
+      method: "DELETE",
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      const err = new Error(`delete ${collection}/${id} failed (${res.status}): ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
+    return true;
+  }
+
   return {
     getDocument,
     createDocument,
     updateDocument,
+    deleteDocument,
     patchTester,
     listCollection,
     listSubcollection,

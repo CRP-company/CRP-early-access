@@ -791,6 +791,13 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
  * pointer would keep pointing at a re-approved tester on a *different* account
  * later, and is genuinely confusing to read during an incident.
  *
+ * DELETE the pointer; do not blank it. Writing `userId: null` leaves a document
+ * behind that is worse than no document at all: findTesterByEmail() only treats
+ * an absent pointer as "not on the roster", so a blanked one makes the next
+ * sign-in from that address fail with 409 "Your tester record needs migrating"
+ * instead of the correct, plain 403. A removed tester must be able to apply
+ * again and sign in cleanly afterwards, which a poisoned pointer prevented.
+ *
  * Best-effort and deliberately outside the removal transaction: a failure here
  * cannot leave anyone able to submit feedback, because the map is what gates
  * that, and it must never roll back a completed removal.
@@ -798,16 +805,16 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
 async function clearTesterIndex(store, { email }) {
   if (!email) return false;
   try {
-    await store.updateDocument(TESTER_INDEX, await hashEmail(email), {
-      userId: null,
-      updatedAt: new Date(),
-    });
+    await store.deleteDocument(TESTER_INDEX, await hashEmail(email));
     return true;
   } catch (error) {
-    console.error(
-      "tester index clear failed",
-      JSON.stringify({ message: error && error.message }),
-    );
+    // 404 is fine: there is no pointer to drop.
+    if (!error || error.status !== 404) {
+      console.error(
+        "tester index clear failed",
+        JSON.stringify({ message: error && error.message }),
+      );
+    }
     return false;
   }
 }

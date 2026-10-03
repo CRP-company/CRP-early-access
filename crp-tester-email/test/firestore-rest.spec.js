@@ -114,6 +114,46 @@ describe("createDocument is unchanged", () => {
   });
 });
 
+/**
+ * Regression: the store must expose deleteDocument.
+ *
+ * removeTester() dropped the testerIndex pointer by calling store.deleteDocument,
+ * but the REST client never defined it. The call threw TypeError, the caller's
+ * catch swallowed it, and the fallback blanked the pointer to `userId: null`
+ * instead — leaving a document that findTesterByEmail() reports as a stale
+ * pre-migration record, so /tester-me answered 409 rather than 403 and the
+ * removed tester could never sign in cleanly again. Production carried two such
+ * pointers. The method being absent is the whole defect, so assert it is present.
+ */
+describe("deleteDocument", () => {
+  it("issues a DELETE to the document path", async () => {
+    stub();
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await store.deleteDocument("testerIndex", "abc123");
+
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(new URL(calls[0].url).pathname).toBe(
+      `${PATH_PREFIX}/testerIndex/abc123`,
+    );
+  });
+
+  it("surfaces a 404 as status 404 so callers can treat it as already gone", async () => {
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => new Response("{}", { status: 404 }));
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.deleteDocument("testerIndex", "missing")).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it("is actually exposed on the store the Worker uses", () => {
+    stub();
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    expect(typeof store.deleteDocument).toBe("function");
+  });
+});
+
 describe("rejectRequestAndReleaseMarker", () => {
   function stubTransaction(markerRequestId, commitStatus = 200) {
     calls = [];

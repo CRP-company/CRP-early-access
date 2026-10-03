@@ -4,6 +4,7 @@ import worker from "../src/index.js";
 import { decideViaWorker } from "../../admin/js/worker-client.js";
 import { __resetKeyCache } from "../src/auth.js";
 import { __resetTokenCache } from "../src/oauth.js";
+import { findTesterByEmail, hashEmail } from "../src/tester-portal.js";
 
 /**
  * Integration: Admin Dashboard -> Worker /accept -> Firestore.
@@ -541,6 +542,47 @@ describe("Admin Dashboard -> Worker /accept", () => {
     // The sequential counter advanced.
     expect(store.docs.get("meta/testerCounter").lastNumber).toBe(1);
     expect([...store.docs.keys()].filter((k) => k.startsWith("audit/")).length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Regression: approval must write a RESOLVABLE pointer.
+   *
+   * /tester-me can only find a tester through `testerIndex/{sha256(email)}`. A
+   * pointer whose userId is null is treated as a stale pre-migration record and
+   * answered with 409 "Your tester record needs migrating", so a freshly approved
+   * tester would be unable to open their own dashboard. Production carried two
+   * such pointers, so this asserts the shape directly rather than inferring it.
+   */
+  it("writes a testerIndex pointer with a real userId after approval", async () => {
+    const token = await mintAdminToken();
+    const result = await decideViaWorker({
+      url: `${WORKER_ORIGIN}/accept`,
+      token,
+      requestId: "r1",
+      decision: "approved",
+    });
+
+    const indexId = await hashEmail("alex@example.com");
+    const pointer = store.docs.get(`testerIndex/${indexId}`);
+
+    expect(pointer).toBeDefined();
+    expect(pointer.userId).toBe(result.userId);
+    // The exact defect: a null here turns every dashboard load into a 409.
+    expect(pointer.userId).not.toBeNull();
+    expect(typeof pointer.userId).toBe("string");
+    expect(pointer.userId.length).toBeGreaterThan(0);
+
+    // And the pointer must actually resolve the tester, which is the whole point.
+    // This spec's store is a wire-level fake (get/list); findTesterByEmail wants
+    // the REST client's shape (getDocument), so adapt rather than duplicate.
+    const portalStore = {
+      getDocument: (c, id) => store.get(c, id),
+      listSubcollection: (parent, name) => store.list(`${parent}/${name}`),
+    };
+    const resolved = await findTesterByEmail(portalStore, "alex@example.com");
+    expect(resolved).not.toBeNull();
+    expect(resolved.userId).toBe(result.userId);
+    expect(resolved.testerNumber).toBe(1);
   });
 
   it("links the account the applicant created, and never creates one", async () => {

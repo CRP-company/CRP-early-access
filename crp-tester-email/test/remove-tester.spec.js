@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { removeTester, setTesterStatus, decideRequest } from "../src/accept.js";
+import { findTesterByEmail, hashEmail } from "../src/tester-portal.js";
 import { META_COLLECTION, COUNTER_DOC } from "../src/tester-lifecycle.js";
 import { buildSaveUrl, ISSUER_ID } from "../src/wallet.js";
 
@@ -89,6 +90,16 @@ function memoryStore(seed = {}) {
         throw e;
       }
       docs.set(key, { ...cur, ...data, updateTime: bump() });
+      return true;
+    },
+    async deleteDocument(c, id) {
+      const key = `${c}/${id}`;
+      if (!docs.has(key)) {
+        const e = new Error("not found");
+        e.status = 404;
+        throw e;
+      }
+      docs.delete(key);
       return true;
     },
     async listCollection(c) {
@@ -672,5 +683,72 @@ describe("Worker route /tester-remove", () => {
     expect(adminSource).toMatch(/body: \{ userId \}/);
     expect(indexSource).toMatch(/const \{ userId, reason \} = body \|\| \{\}/);
     expect(indexSource).toMatch(/const \{ userId \} = body \|\| \{\}/);
+  });
+});
+
+/**
+ * Regression: removal must not leave a `testerIndex` document behind with a null
+ * userId.
+ *
+ * The real defect this covers: clearTesterIndex() used to blank the pointer
+ * (`userId: null`) instead of deleting it, and the delete it tried first
+ * (`store.deleteDocument`) did not exist on the REST store, so that call threw,
+ * was swallowed, and the blanking ran and succeeded. The result was a persistent
+ * pointer that findTesterByEmail() treats as "stale, needs migrating" — so a
+ * removed tester who later signed in got HTTP 409 from /tester-me instead of the
+ * correct 403, and could never sign in again cleanly.
+ */
+describe("testerIndex after removal", () => {
+  const EMAIL = "alex@example.com";
+
+  async function removeWithPointer() {
+    const indexId = await hashEmail(EMAIL);
+    const store = memoryStore({
+      [`users/u1`]: {
+        email: EMAIL,
+        displayName: "Alex Morgan",
+        tester: {
+          id: "t_1",
+          name: "Alex Morgan",
+          email: EMAIL,
+          status: "accepted",
+          testerNumber: 42,
+        },
+      },
+      [`requests/req_1`]: { email: EMAIL, name: "Alex Morgan", status: "approved" },
+      [`testerIndex/${indexId}`]: { userId: "u1", testerId: null },
+    });
+
+    const result = await removeTester(store, {
+      userId: "u1",
+      reason: "left the programme",
+      actorUid: "admin-1",
+      actorEmail: "staff@crp.com",
+    });
+
+    return { store, indexId, result };
+  }
+
+  it("deletes the pointer rather than blanking its userId", async () => {
+    const { store, indexId, result } = await removeWithPointer();
+
+    expect(result.removed).toBe(true);
+    expect(store.docs.has(`testerIndex/${indexId}`)).toBe(false);
+
+    // The precise shape that caused the 409. Asserted directly so the regression
+    // cannot be reintroduced under a different implementation.
+    const pointer = store.docs.get(`testerIndex/${indexId}`);
+    expect(pointer === undefined || pointer.userId !== null).toBe(true);
+  });
+
+  it("leaves no document that would answer 409 to a later sign-in", async () => {
+    const { store, indexId } = await removeWithPointer();
+
+    // Exactly what findTesterByEmail() does: hash the address, read the pointer,
+    // and refuse when one exists with no userId. With the pointer deleted, the
+    // lookup returns null -> the portal reports a plain 403 "not on the roster".
+    const found = await findTesterByEmail(store, EMAIL);
+    expect(found).toBeNull();
+    expect(store.docs.get(`testerIndex/${indexId}`)).toBeUndefined();
   });
 });
