@@ -17,8 +17,12 @@
  * applies — an unset variable must not silently open the routes to every admin.
  */
 
+// Verified against the accounts actually present in crp-cuby-display
+// (`firebase auth:export`): atronamir5@gmail.com holds the `admin` claim.
+// Keep these in step with the real addresses — a typo here is invisible in
+// review and produces a bare 403 on every admin route with no hint why.
 const DEFAULT_ADMIN_EMAILS = Object.freeze([
-  "amiratron5@gmail.com",
+  "atronamir5@gmail.com",
   "idogaldavid@gmail.com",
 ]);
 

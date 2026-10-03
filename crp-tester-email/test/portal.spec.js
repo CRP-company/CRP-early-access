@@ -246,12 +246,12 @@ describe("MONTHLY_TARGET", () => {
 
 describe("admin allowlist", () => {
   it("permits the two CRP staff addresses", () => {
-    expect(isAllowedAdminEmail("amiratron5@gmail.com")).toBe(true);
+    expect(isAllowedAdminEmail("atronamir5@gmail.com")).toBe(true);
     expect(isAllowedAdminEmail("idogaldavid@gmail.com")).toBe(true);
   });
 
   it("is case-insensitive", () => {
-    expect(isAllowedAdminEmail("AmirAtron5@Gmail.com")).toBe(true);
+    expect(isAllowedAdminEmail("AtronAmir5@Gmail.com")).toBe(true);
   });
 
   it("refuses anyone else, including a holder of the admin claim", () => {
@@ -261,14 +261,25 @@ describe("admin allowlist", () => {
 
   // The default must not be "allow everyone" — an unset variable has to fail closed.
   it("falls back to the built-in list when unset or blank", () => {
-    expect(adminEmails(undefined)).toEqual(["amiratron5@gmail.com", "idogaldavid@gmail.com"]);
-    expect(adminEmails("   ")).toEqual(["amiratron5@gmail.com", "idogaldavid@gmail.com"]);
+    expect(adminEmails(undefined)).toEqual(["atronamir5@gmail.com", "idogaldavid@gmail.com"]);
+    expect(adminEmails("   ")).toEqual(["atronamir5@gmail.com", "idogaldavid@gmail.com"]);
+  });
+
+  // A near-miss address must NOT pass. The real allowlist shipped with
+  // `amiratron5@gmail.com` while the actual account was `atronamir5@gmail.com`:
+  // the tests passed (they asserted the same typo), and the only symptom was a
+  // bare 403 on every admin route with nothing in the logs to explain it.
+  // Asserting the negative case is what would have caught it.
+  it("refuses a near-miss spelling of a real admin address", () => {
+    expect(isAllowedAdminEmail("amiratron5@gmail.com")).toBe(false);
+    expect(isAllowedAdminEmail("atronamir5@gamil.com")).toBe(false);
+    expect(isAllowedAdminEmail("atronamir5@")).toBe(false);
   });
 
   it("honours an explicit override", () => {
     expect(adminEmails("one@x.com, two@y.com")).toEqual(["one@x.com", "two@y.com"]);
     expect(isAllowedAdminEmail("two@y.com", "one@x.com, two@y.com")).toBe(true);
-    expect(isAllowedAdminEmail("amiratron5@gmail.com", "one@x.com")).toBe(false);
+    expect(isAllowedAdminEmail("atronamir5@gmail.com", "one@x.com")).toBe(false);
   });
 
   it("refuses a missing or non-string email", () => {
