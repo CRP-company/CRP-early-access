@@ -19,6 +19,7 @@
     "test:exports": "node scripts/verify-exports.js",
     "test:testers": "firebase emulators:exec --only firestore \"node tests/tester-status.test.js\"",
     "test:e2e": "node tests/e2e-signup.js",
+    "test:e2e:login": "firebase emulators:exec --only firestore,auth \"node tests/e2e-tester-login.js\"",
     "test:e2e:worker-failure": "node tests/e2e-worker-failure.js",
     "test:worker": "npm --prefix crp-tester-email test -- --run",
     "deploy": "firebase deploy",

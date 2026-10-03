@@ -44,6 +44,16 @@ const form = document.getElementById("signupForm");
 const joinBtn = document.getElementById("joinButton");
 const consentCheck = document.getElementById("consentCheckbox");
 const messageDiv = document.getElementById("formMessage");
+/**
+ * Link to the tester dashboard's sign-in form.
+ *
+ * Shown only alongside the "you already have an account" message. That dashboard
+ * is a separate page in this same site and already has the full sign-in flow
+ * (email + password + signInWithEmailAndPassword) against this same Firebase
+ * project, so an existing account holder needs a way to REACH it — not a second
+ * auth implementation on this page.
+ */
+const signinLink = document.getElementById("signinLink");
 const emailInput = form.elements.email;
 const nameInput = form.elements.name;
 const passwordInput = form.elements.password;
@@ -215,6 +225,28 @@ function showMessage(text, isError = false) {
   messageDiv.textContent = text;
   messageDiv.classList.toggle("error", isError);
   messageDiv.classList.add("show");
+  // Hidden by default and revealed only by the existing-account branch below, so
+  // the link can never sit under an unrelated message ("already applied",
+  // "weak password") where it would be a non sequitur.
+  if (signinLink) signinLink.hidden = true;
+}
+
+/**
+ * Tell the applicant they already have an account, and give them the way out.
+ *
+ * This is the one dead end in the signup flow: the account exists, so applying
+ * again cannot work, and without this link the only thing the page could say was
+ * "go sign in" with nowhere to go. The destination is the existing tester
+ * dashboard, which signs them in with the very account they already have.
+ */
+function showExistingAccountMessage() {
+  passwordInput.value = "";
+  showMessage(
+    "You already have a CRP account with this email address. Sign in to the " +
+      "tester dashboard instead of applying again.",
+    true,
+  );
+  if (signinLink) signinLink.hidden = false;
 }
 
 /**
@@ -273,6 +305,9 @@ form.addEventListener("submit", async (event) => {
   form.dataset.submitting = "true";
   joinBtn.textContent = "Sending…";
   messageDiv.classList.remove("show", "error");
+  // Cleared alongside the message rather than through showMessage(): a stale
+  // "Sign in" link must not survive into a fresh submission attempt.
+  if (signinLink) signinLink.hidden = true;
   syncSubmitState();
 
   try {
@@ -331,12 +366,7 @@ form.addEventListener("submit", async (event) => {
       // stuck state this change exists to prevent.
       //
       // Only ever tells the applicant about the address THEY typed.
-      passwordInput.value = "";
-      showMessage(
-        "You already have a CRP account with this email address. Sign in to the " +
-          "tester dashboard instead of applying again.",
-        true,
-      );
+      showExistingAccountMessage();
       syncSubmitState();
       return;
     }

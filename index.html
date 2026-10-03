@@ -301,6 +301,24 @@
       color: #bc3a2e;
     }
 
+    /* Revealed by js/signup.js only when Firebase reports the address already has
+       an account. The error text tells the applicant to sign in; without a link
+       beside it, that is a dead end, because the tester dashboard is not linked
+       from this page anywhere else. The [hidden] rule is explicit because
+       display:inline-block would otherwise beat the UA stylesheet's [hidden]. */
+    .form-signin {
+      display: inline-block;
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: #000;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .form-signin[hidden] {
+      display: none;
+    }
+
     /* image block */
     .image-block {
       width: 100%;
@@ -807,6 +825,12 @@
       </div>
       <button type="submit" class="btn-primary" id="joinButton" disabled>Send request</button>
       <div id="formMessage" class="form-message"></div>
+      <!-- Existing-account path. Hidden until js/signup.js sees
+           `auth/email-already-in-use`, so the "you already have an account"
+           message is followed by the one action that actually resolves it:
+           the tester dashboard's existing sign-in form. Same Firebase project,
+           same account, no second auth system. -->
+      <a id="signinLink" class="form-signin" href="tester/index.html" hidden>Sign in to Tester Dashboard</a>
     </form>
   </div>
 

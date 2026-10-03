@@ -181,6 +181,41 @@ const allRequests = async () => {
     !page2.url().includes("sent.html"),
   );
 
+  // --------------------------------- the dead end is actually escapable now
+  // The message tells the applicant to sign in, so the page owes them a way to
+  // do it. Asserted as a visible link that leads to the tester dashboard, not
+  // merely present in the DOM: `hidden` nodes are invisible to a real user.
+  const signinLink = page2.locator("#signinLink");
+  check("the existing-account message offers a sign-in link", await signinLink.isVisible());
+
+  const href = await signinLink.getAttribute("href");
+  check("the link points at the tester dashboard", href === "tester/index.html", `got "${href}"`);
+
+  // Follow it. Landing on a page with no sign-in form would leave the applicant
+  // exactly as stuck as before, so the form's presence is asserted directly.
+  await signinLink.click();
+  const landedOnPortal = await page2
+    .waitForURL(/tester\/index\.html/, { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  check("the link reaches the tester dashboard", landedOnPortal, `url: ${page2.url()}`);
+
+  const hasLoginForm = await page2.locator("#login-form").count();
+  check("the tester dashboard shows its sign-in form", hasLoginForm === 1);
+
+  const emailField = await page2.locator("#login-email").count();
+  const passwordField = await page2.locator("#login-password").count();
+  check("the sign-in form asks for an email and a password",
+    emailField === 1 && passwordField === 1);
+
+  // The link must not be a permanent fixture on the landing page: a stray
+  // "Sign in" under an unrelated message would be a non sequitur.
+  const page3 = await ctx.newPage();
+  await page3.goto(SITE, { waitUntil: "networkidle" });
+  check("the sign-in link stays hidden on a normal page load",
+    !(await page3.locator("#signinLink").isVisible()));
+  await page3.close();
+
   check("the account still exists after the refused attempt", await accountExists(email));
   const afterRequests = await allRequests();
   check("no second request was written", afterRequests.length === 1, `${afterRequests.length}`);
