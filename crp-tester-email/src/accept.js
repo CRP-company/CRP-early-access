@@ -17,12 +17,7 @@ import { buildSaveUrl, accountIdFor } from "./wallet.js";
 import { buildAcceptanceEmail, buildRejectionEmail } from "./decision-emails.js";
 import { sendEmail } from "./resend.js";
 
-import {
-  findUserByEmail,
-  createUser,
-  isEmailAlreadyRegistered,
-  UserAccountError,
-} from "./user-account.js";
+import { findUserByEmail, UserAccountError } from "./user-account.js";
 
 const REQUESTS = "requests";
 const USERS = "users";
@@ -173,50 +168,39 @@ async function findUserDocumentByEmail(store, email) {
 }
 
 /**
- * Resolve (or create) the Firebase Auth account behind an approved applicant.
+ * Resolve the Firebase Auth account behind an approved applicant.
  *
- * The tester's identity is now a Firebase uid, because the tester record lives on
- * `users/{uid}`. So approval has to end with a real account that the applicant
- * can sign in with in the app — an account that did not previously exist has to
- * be created, which is why an approval can now legitimately need a password
- * from the admin.
+ * The tester record lives on `users/{uid}`, so approval has to find the account
+ * that the applicant created for themselves during signup and link the request to
+ * its uid.
  *
- * Race handling: two admins approving the same brand-new applicant at once both
- * see "no account" and both try to create one. Google rejects the loser with
- * EMAIL_EXISTS, and rather than surfacing a confusing failure we re-resolve by
- * email and continue. Exactly one uid wins, so a duplicate identity is not
- * possible.
+ * This NEVER creates an account and NEVER accepts a password. The applicant
+ * chooses their own password on the public form and it goes straight from their
+ * browser to Firebase; CRP never holds it. Keeping creation on that side is the
+ * whole point — there is no point in this code where a password could be logged,
+ * forwarded, or seen by an admin.
  *
- * @returns {Promise<{uid: string, created: boolean, displayName: string|null}>}
+ * If the account is genuinely missing, that is a real inconsistency: an approved
+ * request whose applicant never completed signup. It is reported as such rather
+ * than papered over by creating an account, because inventing one here would
+ * reintroduce exactly the admin-typed-password problem this removed.
+ *
+ * @returns {Promise<{uid: string, displayName: string|null}>}
  */
-async function resolveTesterAccount(env, { email, name, password }) {
+async function resolveTesterAccount(env, { email }) {
   const sa = env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
   const existing = await findUserByEmail(sa, email);
-  if (existing) {
-    return { uid: existing.uid, created: false, displayName: existing.displayName };
-  }
-
-  // No account yet, so one must be created. Without a password this cannot
-  // proceed, and saying so plainly beats letting Firebase reject it.
-  if (!password) {
+  if (!existing) {
     throw new UserAccountError(
-      400,
-      `${email} has no CRP account yet. Provide a password (min 6 characters) to create one.`,
+      409,
+      `${email} has no CRP account, so there is no identity to attach the tester to. ` +
+        `The applicant must complete signup first — re-check that their application ` +
+        `was submitted with the same email address.`,
     );
   }
 
-  try {
-    const created = await createUser(sa, { email, password, displayName: name });
-    return { uid: created.uid, created: true, displayName: created.displayName };
-  } catch (error) {
-    if (isEmailAlreadyRegistered(error)) {
-      // Lost the race — the other admin's account is the one to use.
-      const raced = await findUserByEmail(sa, email);
-      if (raced) return { uid: raced.uid, created: false, displayName: raced.displayName };
-    }
-    throw error;
-  }
+  return { uid: existing.uid, displayName: existing.displayName };
 }
 
 /**
@@ -254,14 +238,10 @@ async function ensureUserDocument(store, { uid, email, displayName, now }) {
  * @param {string} [args.note]
  * @param {string} args.actorUid
  * @param {string} [args.actorEmail]
- * @param {string} [args.password]  Only used when APPROVING an applicant who has no
- *   Firebase account yet: the tester record lives on `users/{uid}`, so approving
- *   them creates the account they will sign in with. Ignored for a rejection and
- *   ignored when the account already exists.
  */
 export async function decideRequest(
   store,
-  { requestId, decision, note, actorUid, actorEmail, env, password },
+  { requestId, decision, note, actorUid, actorEmail, env },
 ) {
   if (decision !== "approved" && decision !== "rejected") {
     throw new AcceptError(400, "decision must be 'approved' or 'rejected'.");
@@ -378,25 +358,19 @@ export async function decideRequest(
     now,
     actorUid,
     env,
-    password,
   });
 }
 
 /** The promotion half of an approval. */
-async function acceptApplication(
-  store,
-  { request, requestId, audit, now, actorUid, env, password },
-) {
+async function acceptApplication(store, { request, requestId, audit, now, actorUid, env }) {
   const testerId = `t_${requestId}`;
 
   // The tester now lives on `users/{uid}`, so approval starts by resolving the
-  // applicant's real Firebase account — creating one if this is their first
-  // acceptance. This happens BEFORE any tester number is allocated, because a
-  // rejected password must not leave a number burned.
+  // account the applicant created for themselves during signup. This happens
+  // BEFORE any tester number is allocated, so a genuinely missing account fails
+  // cleanly rather than burning a number.
   const account = await resolveTesterAccount(env, {
     email: request.email,
-    name: request.name,
-    password,
   });
   const { uid } = account;
 
@@ -471,7 +445,6 @@ async function acceptApplication(
       testerId: linkedId,
       userId: uid,
       testerNumber: linkedNumber,
-      accountCreated: false,
       emailed,
       saveUrl,
     };
@@ -566,9 +539,6 @@ async function acceptApplication(
     testerId,
     userId: uid,
     testerNumber,
-    // The dashboard needs this: a newly created account has credentials the
-    // applicant has never seen, so the admin must be told to pass them on.
-    accountCreated: account.created,
     emailed,
     saveUrl,
   };

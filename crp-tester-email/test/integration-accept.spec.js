@@ -33,18 +33,12 @@ let keysDoc;
 let accessTokenCalls = 0;
 let resendCalls = [];
 // The Firebase Auth accounts this run knows about, and the calls made against
-// it. Approving an applicant now genuinely creates an account, so the fake has
-// to hold real state for "does this person already have a CRP account?".
+// it. The applicant creates their own account during signup, so this fake models
+// an account that ALREADY EXISTS — which is the only thing approval now needs.
+// A create here would mean the Worker had tried to make one, so the endpoint
+// fails loudly instead of quietly succeeding.
 let authUsers = new Map();
 let authCalls = [];
-
-/**
- * The password the dashboard would collect when approving.
- *
- * Approval creates a CRP account for an applicant who does not have one, so
- * every approval in this file supplies it.
- */
-const PW = "correct horse battery";
 let walletKeyPair;
 
 const json = (body, status = 200) =>
@@ -233,28 +227,15 @@ function installFirestore() {
     if (url === "https://identitytoolkit.googleapis.com/v1/accounts") {
       const body = JSON.parse(init.body || "{}");
       const key = String(body.email || "").toLowerCase();
-      if (authUsers.has(key)) {
-        // The real error, so the race-recovery path is genuinely exercised.
-        return json(
-          { error: { code: 400, message: "EMAIL_EXISTS : The email address is already in use." } },
-          400,
-        );
-      }
-      if (!body.password || String(body.password).length < 6) {
-        return json(
-          { error: { code: 400, message: "INVALID_PASSWORD : Password must be at least 6 characters." } },
-          400,
-        );
-      }
-      const user = {
-        localId: `uid-${authUsers.size + 1}`,
-        email: key,
-        displayName: body.displayName,
-        emailVerified: false,
-      };
-      authUsers.set(key, user);
+      // Any create attempt is a bug: the applicant set their own password during
+      // signup, and approval must never create an account. Recording it and
+      // failing means a regression shows up as a broken approval rather than as a
+      // silently-created account.
       authCalls.push({ kind: "create", email: key, password: body.password });
-      return json(user);
+      return json(
+        { error: { code: 400, message: "PERMISSION_DENIED : approval must not create accounts." } },
+        400,
+      );
     }
     if (url.startsWith(BASE)) {
       const parsed = new URL(url);
@@ -481,6 +462,16 @@ beforeEach(async () => {
   authUsers = new Map();
   authCalls = [];
 
+  // The applicant created their own account during signup. Approval links to
+  // this uid and never creates an account itself, so seeding it here is the
+  // realistic starting state for every approval test below.
+  authUsers.set("alex@example.com", {
+    localId: "uid-1",
+    email: "alex@example.com",
+    displayName: "Alex Morgan",
+    emailVerified: false,
+  });
+
   // A genuine signing key, so getAccessToken() exercises real JWT signing.
   serviceAccountJson = JSON.stringify({
     type: "service_account",
@@ -552,33 +543,33 @@ describe("Admin Dashboard -> Worker /accept", () => {
     expect([...store.docs.keys()].filter((k) => k.startsWith("audit/")).length).toBeGreaterThan(0);
   });
 
-  it("creates the Auth account, so the applicant can sign in to the app", async () => {
+  it("links the account the applicant created, and never creates one", async () => {
     const token = await mintAdminToken();
     const result = await decideViaWorker({
       url: `${WORKER_ORIGIN}/accept`,
       token,
       requestId: "r1",
       decision: "approved",
-      password: "correct horse battery",
     });
 
-    // A real account was created, with the admin's password and the request's
-    // name, and the tester record is keyed by the uid Firebase issued.
-    expect(result.accountCreated).toBe(true);
-    expect(authCalls).toEqual([
-      { kind: "create", email: "alex@example.com", password: "correct horse battery" },
-    ]);
-    const account = authUsers.get("alex@example.com");
-    expect(account.localId).toBe(result.userId);
-    expect(account.displayName).toBe("Alex Morgan");
-    // Deliberately NOT verified: acceptance is a staff decision, not proof the
-    // applicant controls the mailbox.
-    expect(account.emailVerified).toBe(false);
+    // Linked to the uid seeded in beforeEach — the account the applicant made
+    // for themselves on the public form.
+    expect(result.userId).toBe("uid-1");
+    expect(store.docs.get("users/uid-1").tester.testerNumber).toBe(1);
+
+    // The Worker never called the create endpoint.
+    expect(authCalls).toHaveLength(0);
+    // And nothing password-shaped came back over the wire.
+    expect(JSON.stringify(result)).not.toMatch(/password/i);
   });
 
-  it("refuses an approval with no password when the account does not exist", async () => {
+  it("refuses to approve when the applicant has no account", async () => {
     const token = await mintAdminToken();
-    // Deliberately no password: the account does not exist, so one is required.
+    // No account at all: the applicant skipped signup, or used another address.
+    // This is reported as an inconsistency rather than papered over by creating
+    // one — creating here is exactly the admin-typed-password path we removed.
+    authUsers.delete("alex@example.com");
+
     await expect(
       decideViaWorker({
         url: `${WORKER_ORIGIN}/accept`,
@@ -586,36 +577,31 @@ describe("Admin Dashboard -> Worker /accept", () => {
         requestId: "r1",
         decision: "approved",
       }),
-    ).rejects.toThrow(/no CRP account yet/i);
+    ).rejects.toThrow(/no CRP account/i);
 
-    // Nothing was created and no number burned, so the admin can retry.
+    // Nothing created, no number burned, no stray user document — so the admin
+    // can retry once the applicant signs up.
     expect(authCalls).toHaveLength(0);
     expect(store.docs.get("meta/testerCounter")).toBeUndefined();
     expect([...store.docs.keys()].filter((k) => k.startsWith("users/"))).toHaveLength(0);
   });
 
-  it("reuses an existing account and does not create a second one", async () => {
-    // The person already signed up in the main app, so no account is needed —
-    // the password is ignored rather than used to overwrite their existing one.
-    authUsers.set("alex@example.com", {
-      localId: "uid-existing",
-      email: "alex@example.com",
-      displayName: "Alex M",
-    });
-
+  it("ignores a password sent by a stale admin dashboard", async () => {
     const token = await mintAdminToken();
     const result = await decideViaWorker({
       url: `${WORKER_ORIGIN}/accept`,
       token,
       requestId: "r1",
       decision: "approved",
-      password: "ignored entirely",
+      password: "admin-typed-password",
     });
 
-    expect(result.userId).toBe("uid-existing");
-    expect(result.accountCreated).toBe(false);
+    // Accepted as normal — the route no longer destructures `password`.
+    expect(result.userId).toBe("uid-1");
     expect(authCalls).toHaveLength(0);
-    expect(store.docs.get("users/uid-existing").tester.testerNumber).toBe(1);
+    // And it was not written anywhere the response or the store can see.
+    const blob = JSON.stringify([...store.docs.entries()]);
+    expect(blob).not.toContain("admin-typed-password");
   });
 
   it("does not clobber the user's other fields when promoting them", async () => {
@@ -640,7 +626,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
       token,
       requestId: "r1",
       decision: "approved",
-      password: PW,
+
     });
 
     const user = store.docs.get("users/uid-existing");
@@ -667,7 +653,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
       token,
       requestId: "r1",
       decision: "approved",
-      password: PW,
+
     });
 
     expect(seen).toHaveLength(1);
@@ -676,10 +662,18 @@ describe("Admin Dashboard -> Worker /accept", () => {
 
   it("assigns distinct numbers to concurrent approvals", async () => {
     for (let i = 1; i <= 3; i += 1) {
+      const email = `p${i + 1}@example.com`;
       store.docs.set(`requests/r${i + 1}`, {
         name: `P${i + 1}`,
-        email: `p${i + 1}@example.com`,
+        email,
         status: "pending",
+      });
+      // Each of these applicants created their own account at signup too.
+      authUsers.set(email, {
+        localId: `uid-p${i + 1}`,
+        email,
+        displayName: `P${i + 1}`,
+        emailVerified: false,
       });
     }
     const token = await mintAdminToken();
@@ -691,7 +685,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
           token,
           requestId: id,
           decision: "approved",
-          password: PW,
+
         }),
       ),
     );
@@ -708,11 +702,15 @@ describe("Admin Dashboard -> Worker /accept", () => {
         token,
         requestId: id,
         decision: "approved",
-          password: PW,
+
       });
 
     store.docs.set("requests/r2", { name: "B", email: "b@example.com", status: "pending" });
     store.docs.set("requests/r3", { name: "C", email: "c@example.com", status: "pending" });
+    // Those two applicants also created their own accounts at signup.
+    for (const [email, name] of [["b@example.com", "B"], ["c@example.com", "C"]]) {
+      authUsers.set(email, { localId: `uid-${email}`, email, displayName: name });
+    }
 
     const results = await Promise.all([post("r1"), post("r2"), post("r3")]);
     expect(results.map((r) => r.testerNumber).sort((a, b) => a - b)).toEqual([1, 2, 3]);
@@ -743,7 +741,7 @@ describe("Admin Dashboard -> Worker /accept", () => {
         token,
         requestId: "r1",
         decision: "approved",
-          password: PW,
+
       }),
     ).rejects.toThrow(/already approved/i);
   });
@@ -884,7 +882,7 @@ describe("Admin Dashboard -> Worker /accept — rejection", () => {
 describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("creates the tester, allocates a number, and emails with the Wallet link", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -915,7 +913,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
 
   it("signs the Wallet pass with the crp-tester-card key, not the Firebase one", async () => {
     const adminToken = await mintAdminToken();
-    const res = await postAccept(adminToken, { requestId: "r1", decision: "approved", password: PW });
+    const res = await postAccept(adminToken, { requestId: "r1", decision: "approved" });
     const { saveUrl } = await res.json();
 
     const parts = saveUrl.split("/").pop().split(".");
@@ -937,7 +935,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
 
   it("sends an acceptance email carrying the number and the Wallet link", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
     const { saveUrl } = await res.json();
 
     expect(resendCalls).toHaveLength(1);
@@ -951,7 +949,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
 
   it("leaks no credential in the response or the email", async () => {
     const token = await mintAdminToken();
-    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
     const responseText = await res.text();
     const mail = JSON.stringify(resendCalls[0].body);
 
@@ -964,11 +962,11 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("refuses a retried approval without a second tester, number or email", async () => {
     const token = await mintAdminToken();
 
-    const first = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const first = await postAccept(token, { requestId: "r1", decision: "approved" });
     expect(first.status).toBe(200);
     expect(resendCalls).toHaveLength(1);
 
-    const second = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const second = await postAccept(token, { requestId: "r1", decision: "approved" });
     expect(second.status).toBe(409);
 
     expect(await store.list("users")).toHaveLength(1);
@@ -979,7 +977,7 @@ describe("Admin Dashboard -> Worker /accept — approval", () => {
   it("does not burn a number when a rejected request is later approved", async () => {
     const token = await mintAdminToken();
     await postAccept(token, { requestId: "r1", decision: "rejected" });
-    const res = await postAccept(token, { requestId: "r1", decision: "approved", password: PW });
+    const res = await postAccept(token, { requestId: "r1", decision: "approved" });
 
     expect(res.status).toBe(409);
     expect(await store.get("meta", "testerCounter")).toBeNull();

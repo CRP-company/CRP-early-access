@@ -49,6 +49,9 @@ async function clear(db, name) {
   await page.fill('input[name="name"]', "Alex Morgan");
   // Mixed case on purpose: the client is expected to normalise before writing.
   await page.fill('input[name="email"]', "Alex.Morgan@Example.com");
+  // The applicant chooses their own account password here, so it must be part of
+  // the flow this test drives.
+  await page.fill("#applicantPassword", "correct-horse-battery");
   await page.check("#consentCheckbox");
   const blockedWithoutExperience = await page.isDisabled("#joinButton");
   await page.check('input[name="experienceCategory"][value="everyday_user"]');
@@ -97,6 +100,7 @@ async function clear(db, name) {
   await page2.goto("http://localhost:8900/index.html?emulator=1", { waitUntil: "networkidle" });
   await page2.fill('input[name="name"]', "Alex Morgan");
   await page2.fill('input[name="email"]', "alex.morgan@example.com");
+  await page2.fill("#applicantPassword", "correct-horse-battery");
   await page2.check('input[name="experienceCategory"][value="everyday_user"]');
   await page2.check("#consentCheckbox");
   await page2.click("#joinButton");

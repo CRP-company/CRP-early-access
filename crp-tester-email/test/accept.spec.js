@@ -1,32 +1,39 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // The Auth layer is stubbed so these tests exercise Firestore behaviour rather
-// than the Identity Toolkit. user-account.spec.js covers the account creation
-// itself, and the integration suite exercises the real fetch path end to end.
-const authState = { existing: new Map(), created: [], emailTaken: new Set() };
+// than the Identity Toolkit. Note there is NO `createUser` stub any more:
+// approval must never create an account, and a stub for it would let a
+// regression slip through silently. `findUserByEmail` returning null is the
+// "applicant never finished signup" case, which must be an error.
+const authState = { existing: new Map(), createCalls: 0 };
 
 vi.mock("../src/user-account.js", async () => {
   const actual = await vi.importActual("../src/user-account.js");
   return {
     ...actual,
-    findUserByEmail: async (_sa, email) =>
-      authState.existing.get(String(email).toLowerCase()) || null,
-    createUser: async (_sa, { email, password, displayName }) => {
-      const key = String(email).toLowerCase();
-      if (authState.emailTaken.has(key)) {
-        const e = new actual.UserAccountError(400, "The email address is already in use.");
-        throw e;
-      }
-      const user = { uid: `uid-${authState.existing.size + 1}`, email: key, displayName };
-      authState.existing.set(key, user);
-      authState.created.push({ email: key, password });
-      return user;
+    findUserByEmail: async (_sa, email) => {
+      authState.createCalls += 0;
+      return authState.existing.get(String(email).toLowerCase()) || null;
+    },
+    // If approval ever calls this, the test that asserts `createCalls === 0`
+    // fails. Exposing the real one keeps that honest.
+    createUser: async () => {
+      authState.createCalls += 1;
+      throw new Error("createUser must not be called during approval");
     },
   };
 });
 
 const { decideRequest, setTesterStatus, AcceptError } = await import("../src/accept.js");
 const { STATUS, META_COLLECTION, COUNTER_DOC } = await import("../src/tester-lifecycle.js");
+
+/** Seed the account the applicant would have created during signup. */
+function seedAccount(email, over = {}) {
+  const key = String(email).toLowerCase();
+  const user = { uid: `uid-${authState.existing.size + 1}`, email: key, ...over };
+  authState.existing.set(key, user);
+  return user;
+}
 
 /**
  * In-memory Firestore modelling the REST preconditions that matter:
@@ -116,8 +123,11 @@ const REQ = (over = {}) => ({
 
 const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
 const ENV = { FIREBASE_SERVICE_ACCOUNT_JSON: "{}" };
-/** Approval payload: the password is only needed when no account exists. */
-const approve = { ...actor, env: ENV, password: "correct horse" };
+/**
+ * Approval payload. Deliberately carries NO password: the applicant chose their
+ * own during signup, and the admin never supplies one.
+ */
+const approve = { ...actor, env: ENV };
 
 const counterValue = (s) => s.docs.get(`${META_COLLECTION}/${COUNTER_DOC}`)?.lastNumber;
 const userKeys = (s) => [...s.docs.keys()].filter((k) => k.startsWith("users/"));
@@ -129,8 +139,7 @@ const withTester = (s) =>
 
 beforeEach(() => {
   authState.existing = new Map();
-  authState.created = [];
-  authState.emailTaken = new Set();
+  authState.createCalls = 0;
 });
 
 describe("decideRequest — rejection", () => {
@@ -149,11 +158,18 @@ describe("decideRequest — rejection", () => {
     expect(withTester(store)).toHaveLength(0);
   });
 
-  it("creates no account, so no password is needed", async () => {
-    // The password is only consulted on approval. A rejection must not fail
-    // because the admin did not supply one.
+  it("creates no account on rejection, and never deletes one", async () => {
+    // A rejection must not touch Auth at all: the applicant keeps the account
+    // they made at signup and can use it for a future application.
+    seedAccount("alex@example.com", { uid: "uid-existing" });
+    const before = authState.existing.size;
+
     await decideRequest(store, { requestId: "r1", decision: "rejected", env: ENV, ...actor });
-    expect(authState.created).toHaveLength(0);
+
+    expect(authState.createCalls).toBe(0);
+    // Still there, untouched — nothing was deleted or added.
+    expect(authState.existing.size).toBe(before);
+    expect(authState.existing.has("alex@example.com")).toBe(true);
   });
 
   it("burns no tester number", async () => {
@@ -173,13 +189,18 @@ describe("decideRequest — approval", () => {
   let store;
   beforeEach(() => {
     store = memoryStore({ "requests/r1": REQ() });
+    // The applicant created their own account during signup. That is the only
+    // thing approval now depends on.
+    seedAccount("alex@example.com", { uid: "uid-existing", displayName: "Alex Morgan" });
   });
 
-  it("creates the tester with accepted status and a number", async () => {
+  it("links the existing Auth account and creates the tester", async () => {
     const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
 
     expect(res.status).toBe("approved");
     expect(res.testerNumber).toBe(1);
+    // Linked to the account the applicant created, not a fresh one.
+    expect(res.userId).toBe("uid-existing");
 
     // The tester is a MAP on the user document, addressed by the Auth uid.
     const user = store.docs.get(`users/${res.userId}`);
@@ -202,37 +223,43 @@ describe("decideRequest — approval", () => {
     expect(t.id).toBe(res.testerId);
   });
 
-  it("creates the Firebase account when the applicant has none", async () => {
-    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
-    expect(res.accountCreated).toBe(true);
-    expect(authState.created).toEqual([
-      { email: "alex@example.com", password: "correct horse" },
-    ]);
-    expect(res.userId).toBe(authState.existing.get("alex@example.com").uid);
+  // The security property this change exists for: approval has no code path that
+  // can create an account or receive a password.
+  it("never creates an Auth account", async () => {
+    await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
+    expect(authState.createCalls).toBe(0);
   });
 
-  it("refuses to approve without a password when no account exists", async () => {
-    // The tester map needs a uid, so an account must exist first. Failing here
-    // is better than burning a tester number for an applicant with no account.
+  it("refuses to approve when the applicant never finished signup", async () => {
+    // No account: the applicant either skipped the password step or used a
+    // different address. This is a real inconsistency, so it is reported as one
+    // rather than papered over by inventing an account here.
+    authState.existing.clear();
+
     await expect(
-      decideRequest(store, { requestId: "r1", decision: "approved", ...actor, env: ENV }),
-    ).rejects.toMatchObject({ status: 400 });
-    // And nothing was written — no number burned, no stray user document.
+      decideRequest(store, { requestId: "r1", decision: "approved", ...approve }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    // Nothing written — no number burned, no stray user document, no account.
     expect(userKeys(store)).toHaveLength(0);
     expect(counterValue(store)).toBeUndefined();
+    expect(authState.createCalls).toBe(0);
   });
 
-  it("reuses an existing account and does not create a second one", async () => {
-    authState.existing.set("alex@example.com", {
-      uid: "uid-existing", email: "alex@example.com", displayName: "Alex",
+  it("ignores a password sent by a stale admin dashboard", async () => {
+    // The route no longer destructures `password`, so it cannot be acted on even
+    // if an old cached dashboard sends one.
+    const res = await decideRequest(store, {
+      requestId: "r1",
+      decision: "approved",
+      ...approve,
+      password: "admin-typed-password",
     });
-    const res = await decideRequest(store, { requestId: "r1", decision: "approved", ...approve });
-
-    expect(res.userId).toBe("uid-existing");
-    expect(res.accountCreated).toBe(false);
-    // The password the admin typed is simply unused when an account exists.
-    expect(authState.created).toHaveLength(0);
-    expect(store.docs.get("users/uid-existing").tester).toBeDefined();
+    expect(res.status).toBe("approved");
+    expect(authState.createCalls).toBe(0);
+    // And it never reached anything that was stored.
+    const user = store.docs.get(`users/${res.userId}`);
+    expect(JSON.stringify(user)).not.toContain("admin-typed-password");
   });
 
   it("does not clobber the user's other fields", async () => {
@@ -270,6 +297,9 @@ describe("decideRequest — approval", () => {
   it("increments sequentially across approvals", async () => {
     store.docs.set("requests/r2", REQ({ email: "b@example.com" }));
     store.docs.set("requests/r3", REQ({ email: "c@example.com" }));
+    // Each applicant created their own account at signup.
+    seedAccount("b@example.com");
+    seedAccount("c@example.com");
 
     const n1 = (await decideRequest(store, { requestId: "r1", decision: "approved", ...approve })).testerNumber;
     const n2 = (await decideRequest(store, { requestId: "r2", decision: "approved", ...approve })).testerNumber;
@@ -279,7 +309,10 @@ describe("decideRequest — approval", () => {
   });
 
   it("gives concurrent approvals distinct numbers", async () => {
-    for (let i = 0; i < 5; i += 1) store.docs.set(`requests/c${i}`, REQ({ email: `c${i}@example.com` }));
+    for (let i = 0; i < 5; i += 1) {
+      store.docs.set(`requests/c${i}`, REQ({ email: `c${i}@example.com` }));
+      seedAccount(`c${i}@example.com`);
+    }
     const results = await Promise.all(
       Array.from({ length: 5 }, (_, i) =>
         decideRequest(store, { requestId: `c${i}`, decision: "approved", ...approve }),

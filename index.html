@@ -164,6 +164,13 @@
       border-color: #a0a0a0;
       box-shadow: 0 0 0 2px rgba(0,0,0,0.02);
     }
+    /* Hint under a field. Sentence case, unlike the uppercase labels above. */
+    .input-group .input-help {
+      margin: 0.5rem 0 0;
+      font-size: 0.8rem;
+      line-height: 1.45;
+      color: #6b6b6b;
+    }
     .experience-fieldset {
       border: 0;
       margin: 1.25rem 0 0;
@@ -732,6 +739,27 @@
           <label for="applicantEmail">Email address</label>
           <input id="applicantEmail" type="email" name="email" required placeholder="test@gmail.com" autocomplete="email">
         </div>
+      </div>
+
+      <!-- Account password. Always shown, and the applicant always sets their own.
+           There is deliberately no "does this email already have an account?" check
+           beforehand: that question cannot be answered without enumerating
+           accounts, which is a vulnerability rather than a convenience. Instead the
+           create is attempted and Firebase's `auth/email-already-in-use` tells us
+           what happened — a code the applicant only ever learns about the address
+           they themselves typed. js/signup.js creates the account, then signs the
+           applicant straight back out. -->
+      <div class="input-group">
+        <label for="applicantPassword">Choose a password</label>
+        <input id="applicantPassword" type="password" name="password" required
+               minlength="6" placeholder="At least 6 characters"
+               autocomplete="new-password"
+               aria-describedby="passwordHelp">
+        <p class="input-help" id="passwordHelp">
+          This becomes your CRP account password — you will use it to sign in to the
+          tester dashboard. It goes straight to Firebase and is never sent to CRP.
+          If you already have a CRP account, sign in instead of applying again.
+        </p>
       </div>
 
       <fieldset class="experience-fieldset">

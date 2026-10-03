@@ -359,7 +359,12 @@ async function handleAdmin(request, env, body, route, origin) {
   }
 
   if (route === "/accept") {
-    const { requestId, decision, note, password } = body || {};
+    // Note the absence of `password`. Approval links the request to an Auth
+    // account the applicant already created for themselves on the public form;
+    // it never receives, creates, or stores a password. Destructuring only these
+    // four fields means a password sent by a stale dashboard is silently ignored
+    // rather than acted on.
+    const { requestId, decision, note } = body || {};
     if (!requestId || typeof requestId !== "string") {
       return json(400, { ok: false, error: "requestId is required." }, origin);
     }
@@ -369,12 +374,8 @@ async function handleAdmin(request, env, body, route, origin) {
       note,
       actorUid: admin.uid,
       actorEmail: admin.email,
-      // Only consulted when approving someone with no Firebase account yet, since
-      // their tester record is written to `users/{uid}` and that account has to
-      // exist first. Never echoed back.
-      password,
-      // env is needed server-side to sign the Wallet pass, to create the Auth
-      // account and to send the decision email. Secrets are read here and never
+      // env is needed server-side to sign the Wallet pass, resolve the applicant's
+      // account and send the decision email. Secrets are read here and never
       // reach the browser.
       env,
     });

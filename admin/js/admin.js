@@ -374,38 +374,21 @@ const WORKER_URL =
 
 async function decideRequest(requestId, decision, button) {
   let note = "";
-  let password = null;
 
   if (decision === "rejected") {
     const answer = prompt("Reason for rejection (optional):");
     if (answer === null) return; // cancelled
     note = answer;
-  } else {
-    // The tester record is written to `users/{uid}`, so approving someone who has
-    // no CRP account yet has to create one — and an account needs a password.
-    // The Worker reports a clear 400 if it is missing, but asking here means the
-    // applicant never sees a failed approval, and the admin finds out before
-    // anything is written.
-    //
-    // This prompt always appears, because the dashboard cannot know whether the
-    // account exists without an extra lookup. A password for an account that
-    // already exists is simply ignored server-side.
-    const applicant = currentRequests.get(requestId);
-    const who = applicant ? applicant.name || applicant.email : "this applicant";
-    const answer = prompt(
-      `Approve ${who}?\n\n` +
-        `If they do not have a CRP account yet, one is created with the password ` +
-        `you enter now. If they already have an account, this is ignored.\n\n` +
-        `Password (min 6 characters), or leave blank to cancel:`,
-      "",
-    );
-    if (answer === null) return; // cancelled
-    if (answer.trim().length < 6) {
-      toast("Enter a password of at least 6 characters, or cancel.", "error");
-      return;
-    }
-    password = answer;
   }
+
+  // No password prompt, deliberately. The applicant chose their own password on
+  // the public signup form and it went straight to Firebase, so CRP has never
+  // seen it and neither has this dashboard. Approval only links the request to
+  // the account that already exists.
+  //
+  // Asking here was actively harmful: it implied the admin knew the applicant's
+  // credentials, and the password had to be transmitted to the Worker to be
+  // usable at all.
 
   setBusy(button, true);
   try {
@@ -419,9 +402,6 @@ async function decideRequest(requestId, decision, button) {
       requestId,
       decision,
       note,
-      // Sent once over the authenticated admin route and never stored or
-      // echoed back. The Worker uses it only if the account must be created.
-      password,
     });
 
     // The roster list is a live onSnapshot subscription, so the new tester
@@ -443,15 +423,6 @@ async function decideRequest(requestId, decision, button) {
       toast(`${label} But the email was NOT sent — check Resend.`, "error");
     } else if (decision === "approved" && !result.saveUrl) {
       toast(`${label} Email sent, but the Wallet link is missing — reissue the card.`, "warn");
-    } else if (decision === "approved" && result.accountCreated) {
-      // The account is new, so the applicant has credentials nobody has seen.
-      // Saying only "approved" would leave the admin assuming the applicant
-      // already knows how to sign in, and they would discover otherwise.
-      toast(
-        `${label} New CRP account created — pass the password you set to them so ` +
-          `they can sign in.`,
-        "warn",
-      );
     } else {
       toast(label);
     }

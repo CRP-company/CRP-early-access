@@ -1,11 +1,22 @@
 /**
  * CRP early-access signup.
  *
- * Replaces the old Formspree POST. The form now writes a document straight to
- * the `requests` collection, which firestore.rules opens to anonymous
- * `create` only. Nothing here touches `users`: the tester record that approval
- * creates is a `tester` map on the applicant's user document, written by the
- * Worker, and the account behind it is created server-side.
+ * Replaces the old Formspree POST. The form writes a document straight to the
+ * `requests` collection, which firestore.rules opens to anonymous `create` only.
+ * Nothing here touches `users`: the tester record that approval creates is a
+ * `tester` map on the applicant's user document, written by the Worker.
+ *
+ * The applicant creates their OWN Firebase Auth account here, choosing their own
+ * password. Approval then only has to link the request to an existing uid — the
+ * admin never sees, sets, or transmits a password.
+ *
+ * There is deliberately no "does this email already have an account?" check
+ * before submitting. That question can only be answered by enumerating accounts,
+ * which is a vulnerability, not a convenience. Instead the create is attempted and
+ * `auth/email-already-in-use` is what tells us the account is taken. The applicant
+ * only ever learns the state of the address they just typed themselves, and a
+ * race (two tabs, or an admin creating the account first) lands on exactly the
+ * same code path — so no duplicate account is possible.
  *
  * The page stays fully static — the SDK is loaded from the gstatic CDN as an
  * ES module, so there is no bundler and no build step.
@@ -20,6 +31,12 @@ import {
   runTransaction,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+import {
+  getAuth,
+  connectAuthEmulator,
+  createUserWithEmailAndPassword,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -29,8 +46,20 @@ const consentCheck = document.getElementById("consentCheckbox");
 const messageDiv = document.getElementById("formMessage");
 const emailInput = form.elements.email;
 const nameInput = form.elements.name;
+const passwordInput = form.elements.password;
 const experienceInputs = form.elements.experienceCategory;
 const websiteInput = form.elements.website;
+
+/**
+ * The address already has a CRP account.
+ *
+ * A distinct class so the catch below can tell "they already have an account"
+ * apart from every other failure, without inspecting an error message string.
+ */
+class ExistingAccountError extends Error {}
+
+/** Firebase's own minimum, mirrored so the form can check it without a round trip. */
+const MIN_PASSWORD_LENGTH = 6;
 
 /**
  * Cloudflare Worker that sends the confirmation email.
@@ -104,26 +133,75 @@ if (!isConfigured) {
   );
 }
 
-/** Firestore handle, created only when the config is valid. */
+/** Firestore + Auth handles, created only when the config is valid. */
 let db = null;
+let auth = null;
 if (isConfigured) {
-  db = getFirestore(initializeApp(firebaseConfig));
+  const app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+  auth = getAuth(app);
 
-  // Opt in to the local emulator with ?emulator=1, so a real submission can be
+  // Opt in to the local emulators with ?emulator=1, so a real submission can be
   // exercised end to end without touching production data. Without the flag we
   // talk to the real project, so this can never fire by accident in the wild.
+  //
+  // Auth needs its own emulator on 9099: account creation is now part of signup,
+  // and without this the create would hit the live project from a local test.
   if (new URLSearchParams(location.search).has("emulator")) {
     connectFirestoreEmulator(db, "127.0.0.1", 8080);
-    console.info("CRP: using the local Firestore emulator");
+    connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+    console.info("CRP: using the local Firestore + Auth emulators");
+  }
+}
+
+/**
+ * Create the applicant's Firebase Auth account with the password they chose.
+ *
+ * The password goes from their browser straight to Firebase. It is never sent to
+ * the Worker, never written to Firestore, and never logged — the only place it
+ * exists is inside the SDK call below and inside Firebase itself.
+ *
+ * @throws {ExistingAccountError} when the address already has an account. That
+ *   covers both a genuine existing account and a race (two tabs submitting, or an
+ *   admin creating the account concurrently), because Firebase reports both as
+ *   `auth/email-already-in-use`.
+ */
+async function createApplicantAccount(email, password) {
+  try {
+    await createUserWithEmailAndPassword(auth, email, password);
+  } catch (error) {
+    if (error && error.code === "auth/email-already-in-use") {
+      // Deliberately not attempting a second create, and not falling back to a
+      // sign-in: either would risk acting on an account the applicant does not own.
+      throw new ExistingAccountError("auth/email-already-in-use");
+    }
+    throw error;
+  }
+
+  // The account exists and we are signed in as the applicant. Sign straight back
+  // out: this page is a public form, and leaving a session behind would mean the
+  // browser stays authenticated on a shared machine after submitting.
+  try {
+    await signOut(auth);
+  } catch {
+    // Non-fatal. The request is already stored; a lingering session is a
+    // nuisance, not a failure, and must not fail the application.
   }
 }
 
 /** Join button is gated on consent and the required experience choice. */
 function syncSubmitState() {
+  // The password is part of the button's validity, not just the submit handler.
+  // Checking it only on submit means an applicant can fill the whole form and
+  // then be told at the last moment that the password is too short — the button
+  // promising an action the form will refuse.
+  const password = passwordInput.value;
   joinBtn.disabled =
     !isConfigured ||
     !consentCheck.checked ||
     !experienceInputs.value ||
+    !password ||
+    password.length < MIN_PASSWORD_LENGTH ||
     form.dataset.submitting === "true";
 }
 consentCheck.addEventListener("change", syncSubmitState);
@@ -170,10 +248,19 @@ form.addEventListener("submit", async (event) => {
 
   const name = nameInput.value.trim();
   const email = emailInput.value.trim().toLowerCase();
+  const password = passwordInput.value;
   const experienceCategory = experienceInputs.value;
 
   if (!name || !email) {
     showMessage("Please fill in your name and email address.", true);
+    return;
+  }
+  // Checked here as well as by `required`/`minlength`, because the form is
+  // novalidate and reportValidity() below is what enforces it — this is the
+  // message the applicant actually reads.
+  if (!password || password.length < 6) {
+    passwordInput.focus();
+    showMessage("Choose a password of at least 6 characters.", true);
     return;
   }
   if (!experienceCategory) {
@@ -189,6 +276,11 @@ form.addEventListener("submit", async (event) => {
   syncSubmitState();
 
   try {
+    // The account comes FIRST. If this fails we must not write a request, because
+    // an application with no account behind it is exactly the stuck state this
+    // change exists to prevent.
+    await createApplicantAccount(email, password);
+
     const emailKey = await hashEmail(email);
     const requestRef = doc(collection(db, "requests"));
     const markerRef = doc(db, "requestEmails", emailKey);
@@ -232,6 +324,23 @@ form.addEventListener("submit", async (event) => {
     // Hand off to the confirmation page.
     window.location.assign("sent.html");
   } catch (error) {
+    if (error instanceof ExistingAccountError) {
+      // Covers both a genuinely existing account and a race between two
+      // submissions. Either way: no second account is created, and no request is
+      // written, because an application without an account behind it is the
+      // stuck state this change exists to prevent.
+      //
+      // Only ever tells the applicant about the address THEY typed.
+      passwordInput.value = "";
+      showMessage(
+        "You already have a CRP account with this email address. Sign in to the " +
+          "tester dashboard instead of applying again.",
+        true,
+      );
+      syncSubmitState();
+      return;
+    }
+
     if (error instanceof DuplicateApplicationError) {
       form.reset();
       syncSubmitState();
@@ -239,7 +348,17 @@ form.addEventListener("submit", async (event) => {
       return;
     }
 
+    // The raw error object is logged, never the form values. Firebase's own auth
+    // errors do not echo the password, and nothing above puts it in the message.
     console.error("CRP signup failed", error);
+
+    // `auth/weak-password` means Firebase's own policy (not just our minlength)
+    // rejected it. Say so in the applicant's terms.
+    if (error && error.code === "auth/weak-password") {
+      passwordInput.value = "";
+      showMessage("That password is too weak. Please choose a longer one.", true);
+      return;
+    }
 
     // `permission-denied` almost always means the rules were not deployed, or
     // the config is pointed at the wrong project. Say so plainly rather than
@@ -258,5 +377,11 @@ form.addEventListener("submit", async (event) => {
     syncSubmitState();
   }
 });
+
+// Re-evaluate as the applicant types, so the button reflects validity without
+// needing a submit attempt to find out. `input` rather than `change`, so it
+// responds as they type instead of on blur.
+passwordInput.addEventListener("input", syncSubmitState);
+emailInput.addEventListener("input", syncSubmitState);
 
 syncSubmitState();

@@ -22,7 +22,13 @@ import { buildSaveUrl, accountIdFor, ISSUER_ID, CLASS_ID } from "../src/wallet.j
 // eslint-disable-next-line import/extensions
 import adminSource from "../../admin/js/admin.js?raw";
 // eslint-disable-next-line import/extensions
+import clientSource from "../../admin/js/worker-client.js?raw";
+// eslint-disable-next-line import/extensions
+import signupSource from "../../js/signup.js?raw";
+// eslint-disable-next-line import/extensions
 import indexSource from "../src/index.js?raw";
+// eslint-disable-next-line import/extensions
+import acceptSource from "../src/accept.js?raw";
 
 /** Minimal in-memory store with the preconditions decideRequest relies on. */
 function memoryStore(seed = {}) {
@@ -197,7 +203,10 @@ const actor = { actorUid: "admin-1", actorEmail: "staff@crp.com" };
 // The Auth layer is stubbed so these tests stay about Firestore behaviour and
 // the emails. An approval resolves — and may create — the applicant's Firebase
 // account, because the tester record is written to `users/{uid}`.
-const authState = { existing: new Map(), created: [] };
+// Stubbed so these tests stay about Firestore and the emails. Approval must
+// never create an account, so there is no `createUser` stub — calling it throws,
+// which turns a regression into a failing test rather than a silent pass.
+const authState = { existing: new Map(), createCalls: 0 };
 
 vi.mock("../src/user-account.js", async () => {
   const actual = await vi.importActual("../src/user-account.js");
@@ -205,24 +214,145 @@ vi.mock("../src/user-account.js", async () => {
     ...actual,
     findUserByEmail: async (_sa, email) =>
       authState.existing.get(String(email).toLowerCase()) || null,
-    createUser: async (_sa, { email, password, displayName }) => {
-      const user = { uid: `uid-${authState.existing.size + 1}`, email, displayName };
-      authState.existing.set(String(email).toLowerCase(), user);
-      authState.created.push({ email, password });
-      return user;
+    createUser: async () => {
+      authState.createCalls += 1;
+      throw new Error("createUser must not be called during approval");
     },
   };
 });
 
+/** Seed the account the applicant created for themselves at signup. */
+function seedAccount(email, over = {}) {
+  const user = {
+    uid: over.uid || `uid-${authState.existing.size + 1}`,
+    email,
+    displayName: "Alex Morgan",
+    ...over,
+  };
+  authState.existing.set(String(email).toLowerCase(), user);
+  return user;
+}
+
 beforeEach(() => {
   authState.existing = new Map();
-  authState.created = [];
+  authState.createCalls = 0;
+  // The default applicant created their own account during signup. Tests that
+  // need a different applicant seed their own on top; tests specifically about a
+  // MISSING account clear this map.
+  seedAccount("alex@example.com");
 });
 
 async function markerKey(email) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+
+/* ------------------------------------------------- password hygiene */
+
+// The property this whole change exists for: a raw password must not exist
+// anywhere CRP controls. Most of these assert against the SOURCE rather than a
+// runtime trace, because the failure mode is subtle — one stray console.log, one
+// extra field in a patch — and a runtime check only catches what it exercised.
+describe("password hygiene", () => {
+  it("the Worker never receives a password on /accept", () => {
+    expect(indexSource).not.toMatch(/const \{[^}]*password[^}]*\} = body/);
+    expect(indexSource).not.toMatch(/password:\s*password/);
+  });
+
+  it("approval never calls createUser", () => {
+    // resolveTesterAccount must only ever look an account up.
+    const resolver = acceptSource.slice(
+      acceptSource.indexOf("async function resolveTesterAccount"),
+      acceptSource.indexOf("async function ensureUserDocument"),
+    );
+    expect(resolver).toContain("findUserByEmail");
+    expect(resolver).not.toContain("createUser");
+  });
+
+  it("the admin dashboard has no password prompt", () => {
+    expect(adminSource).not.toMatch(/password\s*=\s*answer/);
+    expect(adminSource).not.toMatch(/Password \(min 6 characters\)/);
+    expect(adminSource).not.toMatch(/password:\s*password/);
+  });
+
+  it("the worker client never puts a password in the /accept body", () => {
+    const bodyLine = clientSource.match(/body:\s*\{[^}]*\}/);
+    expect(bodyLine).toBeTruthy();
+    expect(bodyLine[0]).not.toContain("password");
+  });
+
+  /* ------------------------------------- the applicant's own password */
+
+  it("the signup form creates the account with the applicant's own password", () => {
+    // The applicant sets it, and it goes straight to Firebase.
+    expect(signupSource).toContain("createUserWithEmailAndPassword");
+    // ...and then signs back out, so the public form leaves no session behind.
+    expect(signupSource).toContain("signOut");
+  });
+
+  it("signup never sends the password to the Worker", () => {
+    // The only fetch to CRP is the best-effort confirmation email. Its body is
+    // built from an explicit field list, so this asserts the exact payload rather
+    // than a slice of the file that might drift.
+    const bodyLine = signupSource.match(/body:\s*JSON\.stringify\(\{[^}]*\}\)/);
+    expect(bodyLine).toBeTruthy();
+    expect(bodyLine[0]).toContain("name");
+    expect(bodyLine[0]).toContain("email");
+    expect(bodyLine[0]).toContain("requestId");
+    expect(bodyLine[0]).not.toContain("password");
+
+    // And the password is never written into the request document.
+    const tx = signupSource.slice(
+      signupSource.indexOf("transaction.set(requestRef"),
+      signupSource.indexOf("transaction.set(markerRef"),
+    );
+    expect(tx).not.toContain("password");
+  });
+
+  it("signup never logs the password", () => {
+    for (const call of signupSource.match(/console\.(log|warn|error|info)\([^)]*\)/g) || []) {
+      expect(call).not.toContain("password");
+    }
+    // The generic failure log must not dump the whole form either.
+    expect(signupSource).not.toMatch(/console\.\w+\([^)]*form\b/);
+  });
+
+  it("signup handles an existing account without a second create", () => {
+    expect(signupSource).toContain("auth/email-already-in-use");
+    expect(signupSource).toContain("ExistingAccountError");
+  });
+
+  it("signup has no account-existence lookup endpoint", () => {
+    // The whole point of approach (A): no pre-submit probe, because answering
+    // "does this account exist?" is account enumeration.
+    expect(signupSource).not.toMatch(/tester-check|check-account|account-exists/);
+  });
+
+  it("signup clears the password field after any failure", () => {
+    expect(signupSource).toContain('passwordInput.value = ""');
+  });
+
+  it("no password is written into any stored document", () => {
+    // Verified against a real approval: nothing password-shaped anywhere in the
+    // resulting Firestore state, including the audit trail.
+    const secret = "sup3rs3cret-never-store-me";
+    const store = memoryStore({ "requests/r1": REQ() });
+    seedAccount("alex@example.com");
+    stubResend();
+
+    return decideRequest(store, {
+      requestId: "r1",
+      decision: "approved",
+      password: secret,
+      ...actor,
+      env: env(),
+    }).then(() => {
+      const blob = JSON.stringify([...store.docs.entries()]);
+      expect(blob).not.toContain(secret);
+      expect(blob.toLowerCase()).not.toContain("password");
+    });
+  });
+});
 
 /** A throwaway RSA key so Wallet signing is genuine, not stubbed. */
 let keyPair;
@@ -534,7 +664,6 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
-      password: "correct horse",
     });
 
     expect(result.status).toBe("approved");
@@ -562,7 +691,6 @@ describe("APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
 
     expect(store.docs.get(`requestEmails/${markerId}`).requestId).toBe("r1");
@@ -577,7 +705,6 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
-      password: "correct horse",
     });
 
     expect(result.saveUrl).toMatch(/^https:\/\/pay\.google\.com\/gp\/v\/save\//);
@@ -617,7 +744,6 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
-      password: "correct horse",
     });
 
     expect(result.emailed).toBe(true);
@@ -643,7 +769,6 @@ describe("APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
 
     const doc = store.docs.get("requests/r1");
@@ -671,7 +796,6 @@ describe("APPROVAL", () => {
       decision: "approved",
       ...actor,
       env: env(),
-      password: "correct horse",
     });
 
     const wallet = store.docs.get(`users/${result.userId}`).tester.wallet;
@@ -690,7 +814,6 @@ describe("APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
 
     const blob = JSON.stringify(sent[0].body);
@@ -703,20 +826,20 @@ describe("APPROVAL", () => {
   it("allocates sequentially across approvals", async () => {
     const store = memoryStore({ "requests/r1": REQ(), "requests/r2": REQ({ email: "b@x.com" }) });
     stubResend();
+    // The second applicant created their own account at signup too.
+    seedAccount("b@x.com");
 
     const a = await decideRequest(store, {
         requestId: "r1",
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
     const b = await decideRequest(store, {
       requestId: "r2",
       decision: "approved",
       ...actor,
       env: env(),
-      password: "correct horse",
     });
 
     expect(a.testerNumber).toBe(1);
@@ -734,7 +857,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
     expect(first.testerNumber).toBe(1);
 
@@ -746,7 +868,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       }),
     ).rejects.toThrow(/already approved/);
 
@@ -765,7 +886,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
     expect(sent).toHaveLength(1);
 
@@ -775,7 +895,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       }),
     ).rejects.toThrow();
 
@@ -791,7 +910,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       });
 
     // Resend dedupes on this for 24h, so even a retried send is collapsed.
@@ -810,7 +928,6 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       }),
     ).rejects.toThrow(/already rejected/);
 
@@ -828,14 +945,12 @@ describe("DUPLICATE PROTECTION ON APPROVAL", () => {
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       }),
       decideRequest(store, {
         requestId: "r1",
         decision: "approved",
         ...actor,
         env: env(),
-        password: "correct horse",
       }),
     ]);
 

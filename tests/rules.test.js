@@ -110,6 +110,78 @@ test("anonymous visitor CANNOT submit a malformed email", async () => {
   await assertFails(addDoc(collection(anon(), "requests"), validRequest({ email: "not-an-email" })));
 });
 
+/* -------------------------------------- the applicant's account password */
+
+// The signup form takes a password, but it goes STRAIGHT to Firebase Auth from
+// the browser and is never part of the request document. These tests pin that:
+// the allowlist has no `password` entry, so even a client that tried to attach
+// one is refused. Without this, a future refactor could add the field to the
+// document and silently start storing every applicant's password in Firestore.
+test("anonymous visitor CANNOT write a password onto a request", async () => {
+  await assertFails(
+    addDoc(collection(anon(), "requests"), validRequest({ password: "correct-horse-battery" })),
+  );
+});
+
+test("a request document can never contain a password field", async () => {
+  // Proved against a real write rather than by reading the rules: submit with a
+  // password, then confirm via the Admin SDK that nothing was stored.
+  const before = await adminDb.collection("requests").count().get();
+  await assertFails(
+    addDoc(collection(anon(), "requests"), validRequest({ password: "leaked-password" })),
+  );
+  const after = await adminDb.collection("requests").count().get();
+
+  if (before.data().count !== after.data().count) {
+    throw new Error("a request was written despite the password field being refused");
+  }
+
+  // Belt and braces: nothing already stored carries one either.
+  const all = await adminDb.collection("requests").get();
+  for (const doc of all.docs) {
+    if (Object.prototype.hasOwnProperty.call(doc.data(), "password")) {
+      throw new Error(`request ${doc.id} has a password field`);
+    }
+  }
+});
+
+test("anonymous visitor CAN create the signup request, with no password field", async () => {
+  // The positive case: the exact document js/signup.js writes today. If the
+  // allowlist ever drifts away from that payload, this fails — which is the
+  // signal that signup and the rules have diverged.
+  await assertSucceeds(addDoc(collection(anon(), "requests"), validRequest()));
+
+  const all = await adminDb.collection("requests").get();
+  const latest = all.docs.map((d) => d.data()).find((d) => d.email === "alex@example.com");
+  if (!latest) throw new Error("the valid request was not stored");
+  if ("password" in latest) throw new Error("the stored request carries a password");
+});
+
+// Every admin-controlled field the public must never be able to set. These are
+// the ones that would actually matter: a forged `testerId` or `reviewedAt`
+// fabricates a decision, and a forged `tester` would invent a tester record.
+const ADMIN_CONTROLLED = [
+  "password",
+  "tester",
+  "testerId",
+  "userId",
+  "reviewedAt",
+  "reviewedBy",
+  "note",
+  "active",
+  "testerNumber",
+  "wallet",
+  "testerHistory",
+];
+
+for (const field of ADMIN_CONTROLLED) {
+  test(`anonymous visitor CANNOT set "${field}" on a request`, async () => {
+    await assertFails(
+      addDoc(collection(anon(), "requests"), validRequest({ [field]: "forged" })),
+    );
+  });
+}
+
 test("concurrent submissions atomically keep one request and its marker", async () => {
   const db = anon();
   const markerRef = doc(db, "requestEmails", `race-${Date.now()}`);

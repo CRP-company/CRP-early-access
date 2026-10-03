@@ -205,26 +205,26 @@ describe("decideViaWorker", () => {
       requestId: "r1",
       decision: "approved",
       note: "strong fit",
-      // Sent only to create the applicant's account. The Worker ignores it when
-      // the account already exists, and never echoes it back.
-      password: null,
     });
     expect(calls[0].init.headers.Authorization).toBe(`Bearer ${JWT}`);
   });
 
-  it("forwards the password needed to create the applicant's account", async () => {
+  it("never puts a password in the /accept body, even if one is passed", async () => {
     const { impl, calls } = captureFetch();
     await decideViaWorker({
       url: URL_UNDER_TEST,
       token: JWT,
       requestId: "r1",
       decision: "approved",
+      // A stale cached dashboard could still send this. The body is built from an
+      // explicit field list, so the password is dropped rather than forwarded.
       password: "correct horse",
       fetchImpl: impl,
     });
-    // The tester record is written to `users/{uid}`, so an applicant with no
-    // CRP account yet needs one created — which requires a password.
-    expect(JSON.parse(calls[0].init.body).password).toBe("correct horse");
+    // The applicant chose their own password during signup; it went to Firebase
+    // and must never travel to the Worker.
+    expect(JSON.parse(calls[0].init.body).password).toBeUndefined();
+    expect(calls[0].init.body).not.toContain("correct horse");
   });
 
   it("defaults note to an empty string", async () => {
