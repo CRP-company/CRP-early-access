@@ -22,7 +22,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const ADMIN_PAGE = "http://localhost:8900/admin/";
+const ADMIN_PAGE = process.env.ADMIN_PAGE || "http://localhost:8900/admin/";
 const API_KEY = "AIzaSyB_uiI4nlcyfgyq61ncJCMDodJPeE_OYIY";
 const ADMIN_EMAIL = "atronamir5@gmail.com";
 
