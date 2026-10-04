@@ -12,6 +12,7 @@
  *   node tests/e2e-signup-account.js
  */
 const { chromium } = require("playwright");
+const crypto = require("crypto");
 
 const EMULATOR_HOST = "127.0.0.1";
 const AUTH_BASE = `http://${EMULATOR_HOST}:9099`;
@@ -159,6 +160,40 @@ const allRequests = async () => {
     `localStorage still holds ${persistedUser}`);
 
   // ------------------------------------ a second attempt is refused cleanly
+  //
+  // The refusal below is the ACTIVE-TESTER path: the applicant is on the roster,
+  // so applying again cannot help and the page sends them to their dashboard.
+  // That is decided by `testerIndex/{sha256(email)}` existing — the Worker's own
+  // signal — so it is seeded here. Without it this address merely has an account,
+  // which is NOT the same thing and is covered by
+  // tests/e2e-signup-existing-account.js.
+  const emailHash = crypto
+    .createHash("sha256")
+    .update(email.trim().toLowerCase())
+    .digest("hex");
+  const seedPointer = await fetch(
+    `${FIREBASE_BASE}/v1/projects/${PROJECT}/databases/(default)/documents:commit`,
+    {
+      method: "POST",
+      headers: { ...adminHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        writes: [{
+          update: {
+            name: `projects/${PROJECT}/databases/(default)/documents/testerIndex/${emailHash}`,
+            fields: {
+              userId: { stringValue: "emulator-uid" },
+              testerId: { nullValue: null },
+              updatedAt: { timestampValue: new Date().toISOString() },
+            },
+          },
+        }],
+      }),
+    },
+  );
+  if (!seedPointer.ok) {
+    throw new Error(`could not seed testerIndex: ${seedPointer.status} ${await seedPointer.text()}`);
+  }
+
   const page2 = await ctx.newPage();
   page2.on("pageerror", (e) => errors.push(String(e.message).split("\n")[0]));
   await page2.goto(SITE, { waitUntil: "networkidle" });

@@ -28,6 +28,7 @@ import {
   connectFirestoreEmulator,
   collection,
   doc,
+  getDoc,
   runTransaction,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
@@ -161,6 +162,42 @@ if (isConfigured) {
     connectFirestoreEmulator(db, "127.0.0.1", 8080);
     connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
     console.info("CRP: using the local Firestore + Auth emulators");
+  }
+}
+
+/**
+ * Is this address currently an ACTIVE CRP Tester?
+ *
+ * `testerIndex/{sha256(email)}` is the authoritative signal, and it is
+ * deliberately the ONLY one consulted. The Worker writes the pointer when a
+ * request is approved, and removal DELETES it — so the pointer's existence means
+ * exactly "is on the roster right now", and its absence means exactly "is not",
+ * whether the person was never a tester or was one and has since been removed.
+ *
+ * That distinction is the whole point. `testerHistory`, the legacy `testers`
+ * collection and `/users/{uid}` are all deliberately NOT read here: a removed
+ * tester keeps all three, and consulting them would make the archive permanent
+ * and block exactly the re-application the programme supports.
+ *
+ * firestore.rules already grants `allow get: if true` on this document, so no
+ * rule change is needed.
+ *
+ * @param {string} emailKey  sha256 of the lowercased address.
+ * @returns {Promise<boolean>}
+ */
+async function isActiveTester(emailKey) {
+  try {
+    const snap = await getDoc(doc(db, "testerIndex", emailKey));
+    return snap.exists();
+  } catch {
+    // The read is world-readable and cannot be denied by rules, so a failure
+    // here is a transient network problem, not an authorisation one. Report "not
+    // currently a tester" and let the request through: no account is created or
+    // signed into, approval stays manual, and the requestEmails marker below
+    // still blocks a genuine duplicate. Blocking here would only reintroduce the
+    // dead end this whole check exists to remove.
+    console.warn("CRP: could not read the tester index; treating as not a tester");
+    return false;
   }
 }
 
@@ -311,10 +348,36 @@ form.addEventListener("submit", async (event) => {
   syncSubmitState();
 
   try {
-    // The account comes FIRST. If this fails we must not write a request, because
-    // an application with no account behind it is exactly the stuck state this
-    // change exists to prevent.
-    await createApplicantAccount(email, password);
+    // The account comes FIRST. If this fails we must not write a request,
+    // UNLESS the address already has an account but is not currently a tester —
+    // a removed tester reapplying, or someone who already has a CRP Focus
+    // account and has never been on the roster.
+    //
+    // "Has a CRP account" and "is a CRP Tester" are different questions, and
+    // conflating them made removal permanent: the account outlives the
+    // tester record, so the old check refused every re-application forever.
+    try {
+      await createApplicantAccount(email, password);
+    } catch (error) {
+      if (!(error instanceof ExistingAccountError)) throw error;
+
+      if (await isActiveTester(await hashEmail(email))) {
+        // Currently on the roster: applying again cannot help. Point them at the
+        // dashboard they already have access to.
+        showExistingAccountMessage();
+        syncSubmitState();
+        return;
+      }
+
+      // Not a tester. Carry on and let the application stand.
+      //
+      // Nothing about the existing account is touched: no second account is
+      // created, nobody is signed in, and the stored account is not modified or
+      // deleted. This proves nothing about who owns the address — approval is
+      // still a manual act, and the Worker links the existing account by email
+      // at that point, exactly as it already does for a returning applicant.
+      console.info("CRP: address already has an account but is not a tester; allowing the application");
+    }
 
     const emailKey = await hashEmail(email);
     const requestRef = doc(collection(db, "requests"));
