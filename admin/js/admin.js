@@ -638,7 +638,20 @@ if (!isConfigured()) {
     "Firebase is not configured yet. Copy admin/js/firebase-config.example.js to " +
     "admin/js/firebase-config.js and paste your project values.";
 } else {
-  const app = initializeApp(firebaseConfig);
+  // Named app "admin", deliberately not the default "[DEFAULT]".
+  //
+  // The tester portal (tester/js/tester.js) uses the same apiKey and projectId
+  // on the same origin, so both would otherwise share ONE Auth persistence store
+  // and the SDK's cross-tab sync. Signing into either page then replaced the
+  // session for both: the other tab's onAuthStateChanged fired with a null user
+  // and this dashboard dropped back to the login form about a second later,
+  // even though its own sign-in had succeeded.
+  //
+  // A distinct app name gives the admin its own Auth instance, its own
+  // IndexedDB store and its own cross-tab channel, so the two dashboards stop
+  // overwriting each other's session. Nothing else changes: same project, same
+  // apiKey, same claims, same rules.
+  const app = initializeApp(firebaseConfig, "admin");
   auth = getAuth(app);
   db = getFirestore(app);
 
