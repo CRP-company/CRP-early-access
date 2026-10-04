@@ -90,10 +90,42 @@ function toast(message, kind = "ok") {
   toast.timer = setTimeout(() => els.toast.classList.remove("show"), 4000);
 }
 
+/**
+ * Normalise any stored timestamp to milliseconds, for comparison.
+ *
+ * `acceptedAt` is not one type. The REST client decodes Firestore timestamps to
+ * ISO strings; the Firestore SDK hands back a Timestamp object; records written
+ * before either may hold a Date, a bare string, or nothing at all. Sorting with
+ * `localeCompare` assumed a string and threw a TypeError on a Timestamp, which
+ * took the whole roster down with it.
+ *
+ * Returns a number so callers can subtract. Anything unparseable — including
+ * null, undefined and a missing field — becomes 0, which sorts it consistently
+ * to the end rather than crashing the render.
+ */
+function timestampValue(value) {
+  if (value === null || value === undefined) return 0;
+  // Date first: a Date is `typeof "object"`, so it would otherwise be swallowed
+  // by the branch below and come back as 0.
+  if (value instanceof Date) return value.getTime();
+  // Firestore Timestamp, and the bare {seconds} shape some records carry.
+  if (typeof value === "object") {
+    if (typeof value.toMillis === "function") return value.toMillis();
+    if (typeof value.toDate === "function") return value.toDate().getTime();
+    if (typeof value.seconds === "number") return value.seconds * 1000;
+    return 0;
+  }
+  if (typeof value === "number") return value;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 function formatDate(value) {
-  if (!value) return "—";
-  const date = typeof value.toDate === "function" ? value.toDate() : new Date(value);
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const ms = timestampValue(value);
+  if (!ms) return "—";
+  return new Date(ms).toLocaleDateString(undefined, {
+    year: "numeric", month: "short", day: "numeric",
+  });
 }
 
 /** Escape untrusted values before putting them anywhere near the DOM. */
@@ -205,8 +237,15 @@ function renderTesters(snapshot) {
   });
 
   // Ordered by acceptance, newest first, matching what the old orderBy did.
+  //
+  // Compared numerically via timestampValue rather than with localeCompare on the
+  // raw field: acceptedAt is a Timestamp for records the SDK wrote and an ISO
+  // string for records the REST client wrote, and both occur in production.
+  // localeCompare threw a TypeError on the Timestamp ones, which stopped the
+  // whole roster from rendering.
   visible.sort(
-    (a, b) => (b.data().tester.acceptedAt || "").localeCompare(a.data().tester.acceptedAt || ""),
+    (a, b) =>
+      timestampValue(b.data().tester.acceptedAt) - timestampValue(a.data().tester.acceptedAt),
   );
 
   els.testersCount.textContent = withTester.length;

@@ -700,6 +700,127 @@ describe("Worker route /tester-remove", () => {
  * Source-level guard: the refresh catch block must return without signing out,
  * and must not print the missing-claim message.
  */
+/**
+ * Regression: the tester roster must render whatever shape `acceptedAt` has.
+ *
+ * The reported crash was
+ *   `(b.data().tester.acceptedAt || "").localeCompare is not a function`
+ * because `acceptedAt` is not always a string. It is a Firestore Timestamp for
+ * records the SDK wrote and an ISO string for records the REST client wrote, and
+ * both occur in production — as do Date, null and a missing field.
+ *
+ * admin.js is a browser module with top-level DOM access, so it cannot simply be
+ * imported here. Instead the shipped `timestampValue` is extracted from the real
+ * source and evaluated in isolation: these assertions run the code that actually
+ * ships, not a copy of it.
+ */
+describe("admin roster timestamp handling", () => {
+  const fnSource = adminSource.match(/function timestampValue\(value\) \{[\s\S]*?\n\}/);
+
+  // Evaluated lazily and defensively: if the helper is ever removed, only these
+  // tests should fail. Building it eagerly at collection time would throw and
+  // take the rest of this spec file down with it.
+  let cached;
+  /** The shipped function itself, or null if it is missing. */
+  function helper() {
+    if (cached === undefined) {
+      // eslint-disable-next-line no-new-func
+      cached = fnSource ? new Function(`return (${fnSource[0]})`)() : null;
+    }
+    return cached;
+  }
+  function timestampValue(value) {
+    const fn = helper();
+    if (!fn) throw new Error("admin.js has no timestampValue helper");
+    return fn(value);
+  }
+
+  it("ships a timestampValue helper", () => {
+    expect(fnSource).not.toBeNull();
+    expect(typeof helper()).toBe("function");
+  });
+
+  it("handles a Firestore Timestamp", () => {
+    // The shape the SDK returns: toDate() and toMillis().
+    const ts = {
+      toDate: () => new Date("2026-09-30T01:22:46.052Z"),
+      toMillis: () => Date.parse("2026-09-30T01:22:46.052Z"),
+    };
+    expect(timestampValue(ts)).toBe(Date.parse("2026-09-30T01:22:46.052Z"));
+  });
+
+  it("handles the bare {seconds} shape some records carry", () => {
+    expect(timestampValue({ seconds: 1759200000 })).toBe(1759200000 * 1000);
+  });
+
+  it("handles a JavaScript Date", () => {
+    const d = new Date("2026-01-02T03:04:05.000Z");
+    expect(timestampValue(d)).toBe(d.getTime());
+  });
+
+  it("handles an ISO string", () => {
+    expect(timestampValue("2026-09-30T01:22:46.052Z"))
+      .toBe(Date.parse("2026-09-30T01:22:46.052Z"));
+  });
+
+  it("handles a plain date string", () => {
+    expect(timestampValue("2026-09-30")).toBe(Date.parse("2026-09-30"));
+  });
+
+  it("handles a raw number of milliseconds", () => {
+    expect(timestampValue(1759200000000)).toBe(1759200000000);
+  });
+
+  it("returns 0 for null, undefined and a missing field", () => {
+    expect(timestampValue(null)).toBe(0);
+    expect(timestampValue(undefined)).toBe(0);
+    expect(timestampValue({})).toBe(0);
+  });
+
+  it("returns 0 for unparseable input rather than NaN", () => {
+    expect(timestampValue("not a date")).toBe(0);
+    expect(Number.isNaN(timestampValue("not a date"))).toBe(false);
+  });
+
+  it("sorts a mixed roster newest first without throwing", () => {
+    // Exactly the shapes seen in production, in one list.
+    const roster = [
+      { name: "iso-string", acceptedAt: "2026-09-30T01:22:46.052Z" },
+      { name: "firestore-timestamp", acceptedAt: {
+        toDate: () => new Date("2026-10-03T15:13:30.681Z"),
+        toMillis: () => Date.parse("2026-10-03T15:13:30.681Z"),
+      } },
+      { name: "null", acceptedAt: null },
+      { name: "missing" },
+      { name: "date-object", acceptedAt: new Date("2026-09-29T22:37:07.426Z") },
+    ];
+
+    const sorted = [...roster].sort(
+      (a, b) => timestampValue(b.acceptedAt) - timestampValue(a.acceptedAt),
+    );
+
+    expect(sorted[0].name).toBe("firestore-timestamp");
+    expect(sorted[1].name).toBe("iso-string");
+    expect(sorted[2].name).toBe("date-object");
+    // The two with no usable date land at the end, in a stable order.
+    expect(["null", "missing"]).toContain(sorted[3].name);
+    expect(["null", "missing"]).toContain(sorted[4].name);
+  });
+
+  it("no longer calls localeCompare on the raw acceptedAt field", () => {
+    expect(adminSource).not.toMatch(/acceptedAt \|\| ""\)\.localeCompare/);
+    expect(adminSource).toMatch(
+      /timestampValue\(b\.data\(\)\.tester\.acceptedAt\)\s*-\s*timestampValue\(a\.data\(\)\.tester\.acceptedAt\)/,
+    );
+  });
+
+  it("formatDate reuses the same helper instead of duplicating the conversion", () => {
+    const fn = adminSource.match(/function formatDate\(value\) \{[\s\S]*?\n\}/)[0];
+    expect(fn).toMatch(/timestampValue\(value\)/);
+    expect(fn).not.toMatch(/new Date\(value\)/);
+  });
+});
+
 describe("admin auth-state claim check", () => {
   const refreshCatch = adminSource.match(
     /await user\.getIdToken\(true\);[\s\S]*?catch \{([\s\S]*?)\n {4}\}/,
