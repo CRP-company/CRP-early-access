@@ -742,68 +742,188 @@ describe("admin auth-state claim check", () => {
 });
 
 /**
- * Regression: removal must not leave a `testerIndex` document behind with a null
- * userId.
+ * Regression: what a removal must leave behind.
  *
- * The real defect this covers: clearTesterIndex() used to blank the pointer
- * (`userId: null`) instead of deleting it, and the delete it tried first
- * (`store.deleteDocument`) did not exist on the REST store, so that call threw,
- * was swallowed, and the blanking ran and succeeded. The result was a persistent
- * pointer that findTesterByEmail() treats as "stale, needs migrating" — so a
- * removed tester who later signed in got HTTP 409 from /tester-me instead of the
- * correct 403, and could never sign in again cleanly.
+ * The defect chain this pins down:
+ *   1. removeTester() called store.deleteDocument(), which the REST client did
+ *      not expose. The call threw and the catch swallowed it.
+ *   2. The fallback blanked the testerIndex pointer to `userId: null` instead of
+ *      deleting it. findTesterByEmail() reads only an ABSENT pointer as "not on
+ *      the roster", so the blanked one answered 409 "Your tester record needs
+ *      migrating" indefinitely.
+ *   3. Nothing deleted the legacy `testers/{testerId}` document, so it went on
+ *      reporting status "accepted" / active true after the tester was gone.
+ *
+ * Production carried the result: a userId:null pointer, and a legacy record for
+ * a tester removed with the reason "test 13".
  */
-describe("testerIndex after removal", () => {
-  const EMAIL = "alex@example.com";
+describe("removal cleans up every stale record", () => {
+  const TESTER_ID = "t1"; // matches TESTER().tester.id
 
-  async function removeWithPointer() {
+  /** A store carrying all three records removal has to deal with. */
+  async function full() {
     const indexId = await hashEmail(EMAIL);
-    const store = memoryStore({
-      [`users/u1`]: {
-        email: EMAIL,
-        displayName: "Alex Morgan",
-        tester: {
-          id: "t_1",
-          name: "Alex Morgan",
-          email: EMAIL,
-          status: "accepted",
-          testerNumber: 42,
-        },
-      },
-      [`requests/req_1`]: { email: EMAIL, name: "Alex Morgan", status: "approved" },
-      [`testerIndex/${indexId}`]: { userId: "u1", testerId: null },
+    const store = memoryStore(TESTER());
+    store.docs.set(`testers/${TESTER_ID}`, {
+      email: EMAIL, status: "accepted", active: true, testerNumber: 4,
     });
-
-    const result = await removeTester(store, {
-      userId: "u1",
-      reason: "left the programme",
-      actorUid: "admin-1",
-      actorEmail: "staff@crp.com",
-    });
-
-    return { store, indexId, result };
+    store.docs.set(`testerIndex/${indexId}`, { userId: "u1", testerId: null });
+    return { store, indexId };
   }
 
-  it("deletes the pointer rather than blanking its userId", async () => {
-    const { store, indexId, result } = await removeWithPointer();
+  const remove = (store) => removeTester(store, { userId: "u1", ...actor, ...REASON });
+
+  it("A. deletes the legacy /testers/{testerId} document", async () => {
+    const { store } = await full();
+    const result = await remove(store);
 
     expect(result.removed).toBe(true);
-    expect(store.docs.has(`testerIndex/${indexId}`)).toBe(false);
-
-    // The precise shape that caused the 409. Asserted directly so the regression
-    // cannot be reintroduced under a different implementation.
-    const pointer = store.docs.get(`testerIndex/${indexId}`);
-    expect(pointer === undefined || pointer.userId !== null).toBe(true);
+    expect(store.docs.has(`testers/${TESTER_ID}`)).toBe(false);
+    expect(result.cleanup.legacyDeleted).toBe(true);
   });
 
-  it("leaves no document that would answer 409 to a later sign-in", async () => {
-    const { store, indexId } = await removeWithPointer();
+  it("B. deletes the testerIndex document rather than leaving it", async () => {
+    const { store, indexId } = await full();
+    await remove(store);
 
-    // Exactly what findTesterByEmail() does: hash the address, read the pointer,
-    // and refuse when one exists with no userId. With the pointer deleted, the
-    // lookup returns null -> the portal reports a plain 403 "not on the roster".
-    const found = await findTesterByEmail(store, EMAIL);
-    expect(found).toBeNull();
-    expect(store.docs.get(`testerIndex/${indexId}`)).toBeUndefined();
+    // Absent entirely. A pointer left behind with userId:null is exactly what
+    // turns every later sign-in from that address into a 409.
+    expect(store.docs.has(`testerIndex/${indexId}`)).toBe(false);
+  });
+
+  it("B2. never writes a userId:null / testerId:null pointer", async () => {
+    const { store, indexId } = await full();
+    // Record every write, so a blanking write is visible even if the document
+    // were recreated afterwards.
+    const writes = [];
+    const realUpdate = store.updateDocument.bind(store);
+    const realCreate = store.createDocument.bind(store);
+    store.updateDocument = (c, id, data, o) => {
+      writes.push({ c, id, data });
+      return realUpdate(c, id, data, o);
+    };
+    store.createDocument = (c, id, data) => {
+      writes.push({ c, id, data });
+      return realCreate(c, id, data);
+    };
+
+    await remove(store);
+
+    const blanked = writes.filter(
+      (w) => w.c === "testerIndex" && w.data && w.data.userId === null,
+    );
+    expect(blanked).toEqual([]);
+    expect(store.docs.has(`testerIndex/${indexId}`)).toBe(false);
+  });
+
+  it("C. removing an already-removed tester is a safe no-op", async () => {
+    const { store } = await full();
+    await remove(store);
+
+    const second = await remove(store);
+    expect(second.removed).toBe(true);
+    expect(second.alreadyRemoved).toBe(true);
+  });
+
+  it("C2. removal still succeeds when the stale records are already absent", async () => {
+    const indexId = await hashEmail(EMAIL);
+    const store = memoryStore(TESTER()); // no legacy doc, no pointer
+    const before = counterValue(store);
+
+    const result = await remove(store);
+
+    expect(result.removed).toBe(true);
+    expect(result.cleanup.errors).toEqual([]);
+    // 404 on both deletes is the desired end state, not a failure.
+    expect(result.cleanup.legacyDeleted).toBe(false);
+    expect(result.cleanup.pointerDeleted).toBe(false);
+    expect(store.docs.has(`testerIndex/${indexId}`)).toBe(false);
+    // The counter is untouched by a removal.
+    expect(counterValue(store)).toBe(before);
+  });
+
+  it("D. a failed legacy deletion is surfaced, not silently swallowed", async () => {
+    const { store } = await full();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const realDelete = store.deleteDocument.bind(store);
+
+    // 403, NOT a 404: a real failure that must not vanish into a clean result.
+    store.deleteDocument = async (c, id) => {
+      if (c === "testers") {
+        const e = new Error("permission denied");
+        e.status = 403;
+        throw e;
+      }
+      return realDelete(c, id);
+    };
+
+    const result = await remove(store);
+
+    // The removal itself stands — the map is gone and archived — but the
+    // incomplete tidy-up is reported rather than dressed up as success.
+    expect(result.removed).toBe(true);
+    expect(result.cleanup.legacyDeleted).toBe(false);
+    expect(result.cleanup.errors).toHaveLength(1);
+    expect(result.cleanup.errors[0]).toMatch(/legacy tester/);
+    // Asserted BEFORE restoring: mockRestore() discards the recorded calls.
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+    // The other cleanup still ran.
+    expect(result.cleanup.pointerDeleted).toBe(true);
+    expect(store.docs.has(`testers/${TESTER_ID}`)).toBe(true); // still there
+  });
+
+  it("E. tester history survives the cleanup", async () => {
+    const { store } = await full();
+    await remove(store);
+
+    // The tester is archived with its number intact, and the user's unrelated
+    // fields are untouched by both the removal and the cleanup.
+    const user = store.docs.get("users/u1");
+    expect(user.tester).toBeUndefined();
+    expect(user.friends).toEqual(["friend-1"]);
+    const history = archived(store);
+    expect(history.testerNumber).toBe(4);
+    expect(history.id).toBe(TESTER_ID);
+    expect(history.removed).toBe(true);
+  });
+
+  it("E2. the audit entry is still written, with its reason", async () => {
+    const captured = [];
+    const { store } = await full();
+    // Record the transactional removal instead of performing it, so the audit
+    // write can be inspected directly.
+    const recording = {
+      ...store,
+      async removeTesterToHistory(args) {
+        captured.push(args);
+        return { removed: true, alreadyRemoved: false };
+      },
+    };
+
+    await removeTester(recording, { userId: "u1", ...actor, ...REASON });
+
+    expect(captured).toHaveLength(1);
+    const args = captured[0];
+    expect(args.auditCollection).toBe("audit");
+    expect(args.auditId).toBe(`removed_${TESTER_ID}`);
+    expect(args.auditEntry.action).toBe("tester.removed");
+    expect(args.auditEntry.testerNumber).toBe(4);
+    expect(args.auditEntry.userId).toBe("u1");
+    expect(args.auditEntry.reason).toBe(REASON.reason);
+  });
+
+  it("F. the tester number stays retired and is never reused", async () => {
+    const { store } = await full();
+    const before = counterValue(store);
+
+    const result = await remove(store);
+
+    // Reported back, so the caller can see which number was burned...
+    expect(result.testerNumber).toBe(4);
+    // ...and kept on the archived snapshot.
+    expect(archived(store).testerNumber).toBe(4);
+    // Nothing in the cleanup allocates or rewinds the counter.
+    expect(counterValue(store)).toBe(before);
   });
 });

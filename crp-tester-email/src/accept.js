@@ -23,6 +23,15 @@ const REQUESTS = "requests";
 const USERS = "users";
 const REQUEST_EMAILS = "requestEmails";
 const TESTER_INDEX = "testerIndex";
+/**
+ * The legacy `testers` collection, kept only so removal can DELETE the document.
+ *
+ * Reads moved to `users/{uid}.tester` during the user-document refactor, and the
+ * constant was dropped at that point — correct for reading, but it left nothing
+ * to clean up with, so the pre-refactor document survived every removal still
+ * claiming status "accepted". No route reads this collection.
+ */
+const TESTERS = "testers";
 const AUDIT = "audit";
 const ISSUER_ID = "3388000000023210330";
 
@@ -743,30 +752,52 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
     throw error;
   }
 
-  // Drop the dashboard lookup pointer, so the removed tester stops resolving to a
-  // record instead of seeing a dashboard they no longer belong to.
+  // Tidy up the records that outlive the removal.
   //
-  // Deliberately NOT part of the transaction above: the removal is already
-  // committed and authoritative, and a failure to tidy the pointer must not turn
-  // a successful removal into an error the admin retries. The dashboard would then
-  // show them as removed, which is the correct outcome anyway.
-  if (releaseId) {
+  // The `tester` map is already gone and archived by the transaction above, so
+  // nothing here can re-grant access — this only stops leftovers from
+  // contradicting that. Two of them used to survive:
+  //
+  //   - the legacy `testers/{testerId}` document, which went on reading
+  //     status "accepted" / active true long after the tester was gone;
+  //   - the `testerIndex/{emailHash}` pointer, which used to be BLANKED to
+  //     userId: null. findTesterByEmail() only treats an absent pointer as "not
+  //     on the roster", so a blanked one turned every later sign-in from that
+  //     address into a 409 "Your tester record needs migrating".
+  //
+  // Deliberately after the transaction: the removal is authoritative once
+  // committed, and a failure here must not undo it or invite a retry that could
+  // double-apply. But failures are NOT swallowed — each is logged by
+  // deleteIfPresent and reported back in `cleanup`, so a half-finished tidy-up is
+  // visible instead of being reported as a clean removal.
+  const cleanup = { pointerDeleted: false, legacyDeleted: false, errors: [] };
+
+  if (email) {
     try {
-      await store.deleteDocument(TESTER_INDEX, releaseId);
+      cleanup.pointerDeleted = await deleteIfPresent(
+        store, TESTER_INDEX, await hashEmail(email), "testerIndex pointer",
+      );
     } catch (error) {
-      // 404 is fine — the pointer was never created for this tester.
-      if (!error || error.status !== 404) {
-        console.error(
-          "tester index release failed",
-          JSON.stringify({ testerId, message: error && error.message }),
-        );
-      }
+      cleanup.errors.push(`testerIndex: ${(error && error.message) || "unknown"}`);
     }
   }
 
-  // Only once the removal has actually committed, so a failed attempt leaves the
-  // pointer in place along with everything else.
-  if (email) await clearTesterIndex(store, { email });
+  if (testerId) {
+    try {
+      cleanup.legacyDeleted = await deleteIfPresent(
+        store, TESTERS, testerId, "legacy tester document",
+      );
+    } catch (error) {
+      cleanup.errors.push(`legacy tester: ${(error && error.message) || "unknown"}`);
+    }
+  }
+
+  if (cleanup.errors.length) {
+    console.error(
+      "removeTester cleanup incomplete",
+      JSON.stringify({ userId, testerId, errors: cleanup.errors }),
+    );
+  }
 
   return {
     userId,
@@ -775,6 +806,9 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
     alreadyRemoved: Boolean(result?.alreadyRemoved),
     testerNumber: tester.testerNumber ?? null,
     email: email || null,
+    // What actually happened to the two stale records. Reported rather than
+    // assumed, so an incomplete tidy-up cannot read as success.
+    cleanup,
     // The caller reissues the card so the applicant's wallet shows REVOKED.
     // Deliberately not generated here: the transactional commit is the
     // authoritative record, and a Wallet failure must not undo a removal.
@@ -783,39 +817,32 @@ export async function removeTester(store, { userId, reason, actorUid, actorEmail
 }
 
 /**
- * Drop the portal pointer for a removed tester.
+ * Delete a document that may already be gone.
  *
- * The `tester` map is already gone by the time this runs, and
- * findTesterByEmail() refuses to resolve an account without one — so the portal
- * is locked regardless. This is tidying rather than enforcement: a dangling
- * pointer would keep pointing at a re-approved tester on a *different* account
- * later, and is genuinely confusing to read during an incident.
+ * A 404 is success, not failure: removal must be idempotent, so removing a
+ * tester twice — or removing one whose index was never written — has to complete
+ * rather than error. Any OTHER failure is logged and re-thrown, because a
+ * silently skipped delete is exactly how the stale documents survived in the
+ * first place: the caller swallowed the error and went on to report success.
  *
- * DELETE the pointer; do not blank it. Writing `userId: null` leaves a document
- * behind that is worse than no document at all: findTesterByEmail() only treats
- * an absent pointer as "not on the roster", so a blanked one makes the next
- * sign-in from that address fail with 409 "Your tester record needs migrating"
- * instead of the correct, plain 403. A removed tester must be able to apply
- * again and sign in cleanly afterwards, which a poisoned pointer prevented.
- *
- * Best-effort and deliberately outside the removal transaction: a failure here
- * cannot leave anyone able to submit feedback, because the map is what gates
- * that, and it must never roll back a completed removal.
+ * @returns {Promise<boolean>} true when a document was actually deleted.
  */
-async function clearTesterIndex(store, { email }) {
-  if (!email) return false;
+async function deleteIfPresent(store, collection, id, label) {
   try {
-    await store.deleteDocument(TESTER_INDEX, await hashEmail(email));
+    await store.deleteDocument(collection, id);
     return true;
   } catch (error) {
-    // 404 is fine: there is no pointer to drop.
-    if (!error || error.status !== 404) {
-      console.error(
-        "tester index clear failed",
-        JSON.stringify({ message: error && error.message }),
-      );
-    }
-    return false;
+    if (error && error.status === 404) return false;
+    console.error(
+      `${label} deletion failed`,
+      JSON.stringify({
+        collection,
+        id,
+        status: error && error.status,
+        message: error && error.message,
+      }),
+    );
+    throw error;
   }
 }
 
