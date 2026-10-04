@@ -647,13 +647,26 @@ if (!isConfigured()) {
 
     // The claim lives on the ID token, not in Firestore. Force a refresh so a
     // freshly granted claim takes effect without needing a full re-login.
+    //
+    // A FAILED refresh must never be read as "this account has no admin claim".
+    // getIdTokenResult() below falls back to whatever token is already cached, and
+    // a token cached from before the claim was granted has no `admin` at all — so
+    // treating the failure as a missing claim both misreported the reason AND
+    // signed out a session that was in fact valid. Worse, that signOut also
+    // destroyed a fresh manual sign-in still completing in another callback, which
+    // is the "logged in for a second, then bounced back to the login form" symptom.
+    // Bailing out here keeps the session intact and reports only what is true: we
+    // could not verify, which is not the same as access being denied.
+    let tokenResult;
     try {
       await user.getIdToken(true);
+      tokenResult = await user.getIdTokenResult();
     } catch {
-      /* fall through to the claim check below */
+      els.loginError.textContent =
+        "Could not verify your session. Please check your connection and try again.";
+      showLogin();
+      return;
     }
-
-    const tokenResult = await user.getIdTokenResult();
 
     if (tokenResult.claims.admin !== true) {
       await signOut(auth);

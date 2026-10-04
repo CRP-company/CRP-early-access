@@ -687,6 +687,61 @@ describe("Worker route /tester-remove", () => {
 });
 
 /**
+ * Regression: a failed token refresh must not be treated as a missing claim.
+ *
+ * The dashboard force-refreshes the ID token on every auth-state change and then
+ * checks the `admin` claim. That refresh can fail transiently (offline, a proxy
+ * blip). The old code swallowed the failure and then read `getIdTokenResult()`,
+ * which falls back to the CACHED token — one minted before the claim existed, so
+ * it has no `admin`. The code concluded "no admin claim" and called signOut(),
+ * destroying a valid session and any fresh manual sign-in still completing in
+ * another callback. Symptom: the dashboard appears, then vanishes back to login.
+ *
+ * Source-level guard: the refresh catch block must return without signing out,
+ * and must not print the missing-claim message.
+ */
+describe("admin auth-state claim check", () => {
+  const refreshCatch = adminSource.match(
+    /await user\.getIdToken\(true\);[\s\S]*?catch \{([\s\S]*?)\n {4}\}/,
+  );
+
+  it("wraps the refresh and the claim read in one try block", () => {
+    // If these are split again, the claim can be read from a stale token.
+    expect(refreshCatch).not.toBeNull();
+    expect(adminSource).toMatch(/tokenResult = await user\.getIdTokenResult\(\);/);
+  });
+
+  it("does NOT call signOut when the token refresh fails", () => {
+    expect(refreshCatch[1]).not.toMatch(/signOut/);
+
+    // Stronger: nothing between the forced refresh and the claim check may sign
+    // the user out. On the pre-fix code `signOut` sat inside the claim branch
+    // that a failed refresh fell through into, so this is what actually pins it.
+    const between = adminSource.match(
+      /await user\.getIdToken\(true\);[\s\S]*?tokenResult\.claims\.admin/,
+    );
+    expect(between).not.toBeNull();
+    expect(between[0]).not.toMatch(/signOut/);
+  });
+
+  it("does NOT report a missing admin claim when the refresh fails", () => {
+    expect(refreshCatch[1]).not.toMatch(/no admin claim/i);
+    expect(refreshCatch[1]).toMatch(/Could not verify your session/i);
+    expect(refreshCatch[1]).toMatch(/return;/);
+  });
+
+  it("still signs out a genuine non-admin account", () => {
+    // The real deny path must be preserved, not weakened.
+    const claimBranch = adminSource.match(
+      /tokenResult\.claims\.admin !== true\) \{([\s\S]*?)\n {4}\}/,
+    );
+    expect(claimBranch).not.toBeNull();
+    expect(claimBranch[1]).toMatch(/await signOut\(auth\)/);
+    expect(claimBranch[1]).toMatch(/no admin claim/i);
+  });
+});
+
+/**
  * Regression: removal must not leave a `testerIndex` document behind with a null
  * userId.
  *
