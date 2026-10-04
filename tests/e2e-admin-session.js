@@ -140,14 +140,21 @@ async function answerSignIn(context, idToken, uid) {
   });
 
   const page = await context.newPage();
-  // Attribute-based, not isVisible(): `.login { display: grid }` in the author
-  // stylesheet beats the UA stylesheet's `[hidden] { display: none }`, so the
-  // hidden login card still computes as "visible". That is a separate,
-  // pre-existing CSS issue and not what this test is about.
-  const appShown = async (p = page) =>
+  // Two separate notions, deliberately:
+  //   attribute — is the `hidden` ATTRIBUTE set? (what the JS intends)
+  //   actual    — is the element really painted away? (what the user sees)
+  // They used to diverge: `.login { display: grid }` beat the UA stylesheet's
+  // `[hidden] { display: none }`, so `hidden` was set while the sign-in card
+  // stayed on screen beside the dashboard. Both are asserted where it matters.
+  const loginHiddenAttr = async (p = page) =>
+    (await p.locator("#login-view").getAttribute("hidden")) !== null;
+  const loginActuallyVisible = async (p = page) =>
+    p.locator("#login-view").isVisible();
+  const appHiddenAttr = async (p = page) =>
     (await p.locator("#app-view").getAttribute("hidden")) === null;
-  const loginShown = async (p = page) =>
-    (await p.locator("#login-view").getAttribute("hidden")) === null;
+  const appActuallyVisible = async (p = page) => p.locator("#app-view").isVisible();
+  const appShown = appHiddenAttr;
+  const loginShown = async (p = page) => (await loginHiddenAttr(p)) === false;
   const errorText = async (p = page) =>
     (await p.locator("#login-error").textContent().catch(() => "")).trim();
   const signIn = async () => {
@@ -161,6 +168,12 @@ async function answerSignIn(context, idToken, uid) {
   await signIn();
   await page.waitForSelector("#app-view:not([hidden])", { timeout: 20000 }).catch(() => {});
   check("the dashboard opens for a valid admin token", await appShown());
+
+  // The user-visible half of that: not just "the attribute is set" but the
+  // sign-in card is genuinely off screen. This is what regressed.
+  check("the login element carries the hidden attribute", await loginHiddenAttr());
+  check("the login element is actually NOT visible", !(await loginActuallyVisible()));
+  check("the dashboard is actually visible", await appActuallyVisible());
 
   // ---------------------------------------------------------------- phase 2
   console.log("\n  2. Reload while the token refresh is failing");
@@ -188,6 +201,9 @@ async function answerSignIn(context, idToken, uid) {
   await page.waitForSelector("#app-view:not([hidden])", { timeout: 20000 }).catch(() => {});
   check("the dashboard returns from the persisted session alone", await appShown());
   check("the login view is marked hidden", !(await loginShown()));
+  check("the login card is still genuinely off screen after the reload",
+    !(await loginActuallyVisible()));
+  check("the dashboard is genuinely visible after the reload", await appActuallyVisible());
 
   // ------------------------------------------------------ phase 4: the real bug
   // The faithful reproduction of the reported symptom.
@@ -233,6 +249,8 @@ async function answerSignIn(context, idToken, uid) {
   await page.waitForSelector("#app-view:not([hidden])", { timeout: 20000 }).catch(() => {});
   check("the dashboard opens from the preserved session", await appShown());
   check("no password was re-entered", !(await loginShown()));
+  check("the login card is genuinely off screen", !(await loginActuallyVisible()));
+  check("the dashboard is genuinely visible", await appActuallyVisible());
 
   // ---------------------------------------------------------------- phase 6
   // The genuine deny path must be intact: a real non-admin token is still
@@ -255,6 +273,8 @@ async function answerSignIn(context, idToken, uid) {
   check("a genuine non-admin token is refused", /no admin claim/i.test(nonAdminError),
     `shown: "${nonAdminError}"`);
   check("the dashboard stays hidden for a non-admin token", !(await appShown()));
+  check("the login form is actually visible again for the non-admin",
+    await loginActuallyVisible());
 
   // It must also have been SIGNED OUT, so a reload does not resurrect it.
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -275,6 +295,10 @@ async function answerSignIn(context, idToken, uid) {
     (await page2.locator("#login-error").textContent().catch(() => "")).trim();
   check("wrong credentials show a readable error", wrongError.length > 0, `shown: "${wrongError}"`);
   check("wrong credentials do not open the dashboard", !(await appShown(page2)));
+  check("wrong credentials keep the login form actually visible",
+    await loginActuallyVisible(page2));
+  check("wrong credentials never reveal the dashboard",
+    !(await appActuallyVisible(page2)));
   await browser.close();
   console.log("");
   console.log(failed === 0 ? "ADMIN SESSION E2E PASS" : `ADMIN SESSION E2E FAIL (${failed})`);

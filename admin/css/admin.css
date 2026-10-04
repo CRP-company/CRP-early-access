@@ -16,6 +16,20 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* The `hidden` attribute must actually hide an element.
+ *
+ * The browser's own `[hidden] { display: none }` lives in the UA stylesheet, so
+ * ANY author rule that sets `display` on the element beats it — `.login` below
+ * sets `display: grid`, which is why showApp()'s `login.hidden = true` left the
+ * sign-in card on screen next to the dashboard it had just revealed.
+ *
+ * `!important` is required rather than a higher specificity: no ordinary
+ * author selector can outrank another author selector, so this has to win at the
+ * cascade's own priority. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
