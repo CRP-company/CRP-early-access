@@ -294,7 +294,12 @@ textarea {
 
 .slot {
   flex: 0 0 calc(50% - 1.5px);
-  height: 100%;
+  /* min-height, NOT height. A slot has no content of its own, so a percentage
+     height resolves against an auto-height flex container and collapses to 0 —
+     the cards were being laid out at full width but with zero height, which is
+     why the count read correctly while nothing was visible. A min-height gives
+     the slot its size without preventing it from ever growing. */
+  min-height: 26px;
   border-radius: 6px;
   background: #e6e6e4;
 }
