@@ -283,7 +283,13 @@ async function handleTester(request, env, body, route, origin) {
       return json(400, { ok: false, error: validated.error }, origin);
     }
 
-    const doc = buildFeedbackDoc(validated, { tester, email });
+    // `validateFeedback` returns a WRAPPER, `{ ok, value }`. The fields live on
+    // `.value`; passing the wrapper instead made every one of them undefined, and
+    // encodeFields silently drops undefined — so the document was written with
+    // only testerId/email/createdAt/updatedAt, and title, body, area, status and
+    // period were lost. Both dashboards then rendered a blank request, and the
+    // monthly count stayed at zero because it counts documents carrying `period`.
+    const doc = buildFeedbackDoc(validated.value, { tester, email });
     // Auto-id: the Worker owns the id, so a client cannot overwrite an existing
     // submission by guessing its document id.
     const feedbackId = crypto.randomUUID();
