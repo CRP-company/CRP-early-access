@@ -300,8 +300,7 @@ textarea {
 
 /* A request inside the monthly minimum: the requirement is met. */
 .slot--done {
-  background: var(--ok-bg);
-  border-color: #5bbe64;
+  background: #5bbe64;
 }
 
 /* Beyond the minimum: extra, not obligation. */
