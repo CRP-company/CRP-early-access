@@ -56,6 +56,8 @@
     </form>
   </section>
 
+
+
   <!-- Dashboard ---------------------------------------------------------- -->
   <main id="app-view" class="wrap" hidden>
     <header class="topbar">
@@ -67,39 +69,50 @@
       <button id="sign-out" class="btn btn--ghost">Sign out</button>
     </header>
 
-    <section class="card">
-      <div class="card__head">
-        <h2>This month</h2>
-        <span class="target" id="target-indicator">
-          <span class="dot" id="dot-1"></span>
-          <span class="dot" id="dot-2"></span>
-          <span id="target-text"></span>
-        </span>
-      </div>
-      <p class="muted" id="target-hint">
-        Please send us at least two requests a month. They are how we decide what
-        CRP Focus does next.
-      </p>
-    </section>
+    <!-- "This month" and "Your requests" share a row; the new-request form sits
+         below them. -->
+    <div class="card-row">
+      <section class="card">
+        <div class="card__head">
+          <h2>This month</h2>
+          <span class="target" id="target-indicator">
+            <span class="dot" id="dot-1"></span>
+            <span class="dot" id="dot-2"></span>
+            <span id="target-text"></span>
+          </span>
+        </div>
+        <p class="muted" id="target-hint">
+          You must send at least 2 requests per month to remain in the program.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card__head">
+          <h2>Your requests</h2>
+          <span class="pill" id="feedback-count">0</span>
+        </div>
+        <div id="feedback-list"></div>
+      </section>
+    </div>
 
     <section class="card">
       <div class="card__head">
-        <h2>Tell us what to build</h2>
+        <h2>New request</h2>
         <span class="pill pill--ok" id="can-submit">Open</span>
       </div>
 
       <form id="feedback-form" novalidate>
-        <label for="feedback-title">What would you like?</label>
-        <input id="feedback-title" type="text" maxlength="120" placeholder="Add a dark mode" required>
 
         <label for="feedback-area">What is it about?</label>
         <select id="feedback-area" required>
           <option value="">Choose one…</option>
-          <option value="app">The CRP Focus app</option>
-          <option value="product">A CRP product</option>
-          <option value="hardware">Cuby hardware</option>
+          <option value="app">CRP Focus</option>
+          <option value="hardware">Cuby device</option>
           <option value="other">Something else</option>
         </select>
+
+        <label for="feedback-title">request title</label>
+        <input id="feedback-title" type="text" maxlength="120" placeholder="Add a dark mode" required>
 
         <label for="feedback-body">Tell us more</label>
         <textarea id="feedback-body" maxlength="2000" placeholder="What you were trying to do, and what would be better." required></textarea>
@@ -111,14 +124,6 @@
 
       <!-- Shown instead of the form when the tester is not currently active. -->
       <div id="feedback-blocked" class="alert alert--error" hidden></div>
-    </section>
-
-    <section class="card">
-      <div class="card__head">
-        <h2>Your requests</h2>
-        <span class="pill" id="feedback-count">0</span>
-      </div>
-      <div id="feedback-list"></div>
     </section>
 
     <p class="footer">©2026 CRP. Tester program.</p>

@@ -218,11 +218,25 @@ textarea {
 }
 
 .card {
-  background: #fff;
-  border: 1px solid var(--border);
+  background: #f1f1f1;
   border-radius: var(--radius);
   padding: 1.5rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 3px;
+}
+
+/* Two cards side by side — "This month" next to "Your requests". */
+.card-row {
+  display: flex;
+  flex-direction: row;
+  gap: 3px;
+}
+
+.card-row > .card {
+  /* Share the row evenly. Without this the cards shrink to their content width
+     and sit bunched at the left instead of filling the row. */
+  flex: 1 1 0;
+  /* Without min-width a long unbroken value can stop a flex item shrinking. */
+  min-width: 0;
 }
 
 .card__head {
@@ -338,5 +352,9 @@ textarea {
   }
   h1 {
     font-size: 1.8rem;
+  }
+  /* Side by side stops being readable on a phone — stack them instead. */
+  .card-row {
+    flex-direction: column;
   }
 }
