@@ -231,12 +231,9 @@ textarea {
   gap: 3px;
 }
 
-.card-row > .card {
-  /* Share the row evenly. Without this the cards shrink to their content width
-     and sit bunched at the left instead of filling the row. */
-  flex: 1 1 0;
-  /* Without min-width a long unbroken value can stop a flex item shrinking. */
-  min-width: 0;
+.card-row > .card:first-child {
+  display: flex;
+  flex-direction: column;
 }
 
 .card__head {
@@ -290,15 +287,12 @@ textarea {
   flex-wrap: wrap;
   gap: 3px;
   margin-top: 0.85rem;
+  flex: 1;
+  min-height: 0;
 }
 
 .slot {
   flex: 0 0 calc(50% - 1.5px);
-  /* min-height, NOT height. A slot has no content of its own, so a percentage
-     height resolves against an auto-height flex container and collapses to 0 —
-     the cards were being laid out at full width but with zero height, which is
-     why the count read correctly while nothing was visible. A min-height gives
-     the slot its size without preventing it from ever growing. */
   min-height: 26px;
   border-radius: 6px;
   background: #e6e6e4;
@@ -307,13 +301,12 @@ textarea {
 /* A request inside the monthly minimum: the requirement is met. */
 .slot--done {
   background: var(--ok-bg);
-  border-color: #b6dcb9;
+  border-color: #5bbe64;
 }
 
 /* Beyond the minimum: extra, not obligation. */
 .slot--bonus {
-  background: #e3f0fb;
-  border-color: #b3d3f0;
+  background: #7caad0;
 }
 
 .entry {
