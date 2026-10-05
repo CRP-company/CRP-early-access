@@ -3,6 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+  <!-- CRP logo as the browser icon, on every page of the programme.
+       Served from raw.githubusercontent so all pages can share one identical URL
+       regardless of their path; the GitHub blob URL redirects twice to reach the
+       file. Declaring it also stops the browser's automatic /favicon.ico
+       request, which 404s on GitHub Pages and shows as a console error. -->
+  <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/CRP-company/CRP-early-access/main/assets/CRPlogo.png">
   <title>CRP · Request received</title>
   <meta name="description" content="We have your CRP early access request and will be in touch.">
   <meta name="robots" content="noindex">

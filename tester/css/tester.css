@@ -70,22 +70,14 @@ body {
 .login__card {
   width: 100%;
   max-width: 400px;
-  background: #fff;
-  border: 1px solid var(--border);
+  z-index: 1;
+  background: #f1f1f1;
   border-radius: var(--radius);
   padding: 2rem;
 }
 
 .badge {
-  display: inline-block;
-  font-family: 'Space Grotesk', monospace;
-  font-weight: 500;
-  font-size: 0.8rem;
-  letter-spacing: 0.5px;
-  color: #2c2c2c;
-  border: 1px solid var(--border);
-  padding: 0.35rem 1rem;
-  border-radius: 40px;
+  height: 40px;
 }
 
 h1 {
