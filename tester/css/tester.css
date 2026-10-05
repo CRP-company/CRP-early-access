@@ -294,10 +294,9 @@ textarea {
 
 .slot {
   flex: 0 0 calc(50% - 1.5px);
-  height: 26px;
+  height: 100%;
   border-radius: 6px;
   background: #e6e6e4;
-  border: 1px solid #d4d4d1;
 }
 
 /* A request inside the monthly minimum: the requirement is met. */
