@@ -75,15 +75,12 @@
       <section class="card">
         <div class="card__head">
           <h2>This month</h2>
-          <span class="target" id="target-indicator">
-            <span class="dot" id="dot-1"></span>
-            <span class="dot" id="dot-2"></span>
-            <span id="target-text"></span>
-          </span>
+          <span class="target" id="target-text"></span>
         </div>
-        <p class="muted" id="target-hint">
-          You must send at least 2 requests per month to remain in the program.
-        </p>
+        <!-- One card per request, under the heading. Grey for a slot still to
+             fill, green for the monthly minimum met, blue for anything beyond
+             it. Populated by renderTarget(). -->
+        <div class="request-slots" id="request-slots" role="img"></div>
       </section>
 
       <section class="card">

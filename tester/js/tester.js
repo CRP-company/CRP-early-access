@@ -46,7 +46,7 @@ const els = {
   name: document.getElementById("tester-name"),
   meta: document.getElementById("tester-meta"),
   targetText: document.getElementById("target-text"),
-  dots: [document.getElementById("dot-1"), document.getElementById("dot-2")],
+  requestSlots: document.getElementById("request-slots"),
   feedbackForm: document.getElementById("feedback-form"),
   feedbackTitle: document.getElementById("feedback-title"),
   feedbackArea: document.getElementById("feedback-area"),
@@ -165,16 +165,38 @@ async function postToWorker(path, body, { auth: withAuth = true } = {}) {
  * Render
  * ------------------------------------------------------------------ */
 
+/**
+ * Draw one card per request made this month.
+ *
+ * Always at least `target` cards, so the minimum is visible as empty slots from
+ * the start. Each request beyond the target adds another card.
+ *
+ * Colour carries the meaning:
+ *   - grey  — a slot still to fill
+ *   - green — a request inside the monthly minimum, i.e. the requirement met
+ *   - blue  — a request beyond the minimum: extra, not obligation
+ */
 function renderTarget(activity) {
   const { submitted, target } = activity;
 
-  // Two dots rather than "1/2": it reads at a glance and does not need the
-  // arithmetic, which is the point when the answer is "have you done enough yet".
-  els.dots.forEach((dot, i) => {
-    dot.classList.toggle("dot--on", i < submitted);
-  });
+  const total = Math.max(target, submitted);
 
+  els.requestSlots.replaceChildren();
+  for (let i = 0; i < total; i += 1) {
+    const slot = document.createElement("div");
+    const filled = i < submitted;
+    slot.className = filled
+      ? (i < target ? "slot slot--done" : "slot slot--bonus")
+      : "slot";
+    els.requestSlots.appendChild(slot);
+  }
+
+  // The same fact, in words, for anyone not reading the colours.
   const remaining = Math.max(0, target - submitted);
+  els.requestSlots.setAttribute(
+    "aria-label",
+    `${submitted} request${submitted === 1 ? "" : "s"} sent this month; ${target} needed.`,
+  );
   els.targetText.textContent = remaining === 0
     ? `Done for ${activity.period}`
     : `${remaining} more this month`;

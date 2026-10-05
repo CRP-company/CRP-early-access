@@ -280,16 +280,36 @@ textarea {
   color: var(--muted);
 }
 
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1px solid #cfcfcf;
+/* One card per request made this month, sitting under the "This month" heading.
+ *
+ * Two per row, each taking half the width. `calc(50% - 1.5px)` rather than a
+ * plain 50%: with a 3px gap, two 50% items overflow the row by 3px and wrap.
+ */
+.request-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 0.85rem;
 }
 
-.dot--on {
-  background: #000;
-  border-color: #000;
+.slot {
+  flex: 0 0 calc(50% - 1.5px);
+  height: 26px;
+  border-radius: 6px;
+  background: #e6e6e4;
+  border: 1px solid #d4d4d1;
+}
+
+/* A request inside the monthly minimum: the requirement is met. */
+.slot--done {
+  background: var(--ok-bg);
+  border-color: #b6dcb9;
+}
+
+/* Beyond the minimum: extra, not obligation. */
+.slot--bonus {
+  background: #e3f0fb;
+  border-color: #b3d3f0;
 }
 
 .entry {
