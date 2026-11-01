@@ -313,6 +313,11 @@ textarea {
   background: #7caad0;
 }
 
+#feedback-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 .entry {
   padding: 1rem 0;
   border-bottom: 1px solid #f0f0f0;
