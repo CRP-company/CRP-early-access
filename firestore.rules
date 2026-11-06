@@ -275,6 +275,9 @@ service cloud.firestore {
     match /financials/{document=**} {
       allow read, write: if isFinancialAdmin();
     }
+    match /analytics/{document=**} {
+      allow read, write: if isFinancialAdmin();
+    }
     match /expenses/{document=**} {
       allow read, write: if isFinancialAdmin();
     }

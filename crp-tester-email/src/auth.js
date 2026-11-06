@@ -100,6 +100,52 @@ export async function requireAdmin(request, projectId) {
 }
 
 /**
+ * Verify a Firebase ID token and require owner role or financial authorization,
+ * plus step-up freshness (authenticated within the last 15 minutes / 900 seconds).
+ *
+ * @param {Request} request
+ * @param {string} projectId
+ * @param {object} [env]
+ * @returns {Promise<{uid: string, email: string, role: string}>}
+ * @throws {AuthError}
+ */
+export async function requireFinancialAdmin(request, projectId, env) {
+  const payload = await verifyIdToken(request, projectId);
+
+  const isFinancial =
+    payload.role === "owner" ||
+    (payload.admin === true && payload.financials === true);
+
+  if (!isFinancial) {
+    throw new AuthError(403, "This action is restricted to CRP financial owners.");
+  }
+
+  // Step-up authentication freshness: must have authenticated within 15 minutes (900s)
+  const now = Math.floor(Date.now() / 1000);
+  const authTime = payload.auth_time || 0;
+  if (authTime < now - 900) {
+    const err = new AuthError(
+      401,
+      "Recent authentication required (step-up auth). Please re-enter your password to access financial data.",
+    );
+    err.code = "REAUTH_REQUIRED";
+    throw err;
+  }
+
+  const result = {
+    uid: payload.user_id || payload.sub || "",
+    email: payload.email || "",
+    role: payload.role || "owner",
+  };
+  Object.defineProperty(result, "authTime", {
+    value: authTime,
+    enumerable: false,
+    writable: true,
+  });
+  return result;
+}
+
+/**
  * Verify a Firebase ID token and return the identity, with no claim requirement.
  *
  * Split out of requireAdmin() so the tester routes can start from the same

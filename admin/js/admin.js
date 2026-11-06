@@ -41,6 +41,7 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 import { decideViaWorker, postToWorker } from "./worker-client.js";
 import { experienceCategoryDisplay } from "./experience-category.js";
+import { initFinancial } from "./financial.js";
 
 const els = {
   login: document.getElementById("login-view"),
@@ -678,7 +679,34 @@ function showApp() {
   // subscription, and the request queue should not wait on this fetch.
   loadFeedback();
   warnIfWorkerUnconfigured();
+
+  try {
+    initFinancial(auth, WORKER_URL);
+  } catch (err) {
+    console.warn("Could not initialize financial module:", err);
+  }
 }
+
+// Step-up reauthentication form listener for financial actions
+document.getElementById("reauth-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const pwdInput = document.getElementById("reauth-password");
+  const errEl = document.getElementById("reauth-error");
+  const password = pwdInput?.value || "";
+  if (!auth?.currentUser || !password) return;
+
+  try {
+    const cred = EmailAuthProvider.credential(auth.currentUser.email, password);
+    await reauthenticateWithCredential(auth.currentUser, cred);
+    await auth.currentUser.getIdToken(true);
+    if (pwdInput) pwdInput.value = "";
+    if (errEl) errEl.textContent = "";
+    document.getElementById("modal-reauth")?.close();
+    toast("Authentication refreshed successfully.", "ok");
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message || "Invalid password.";
+  }
+});
 
 /**
  * Make a missing Worker config obvious up front.

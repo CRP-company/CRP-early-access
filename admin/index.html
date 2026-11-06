@@ -48,85 +48,540 @@
       <button id="sign-out" class="btn">Sign out</button>
     </header>
 
-    <section class="panel">
-      <div class="panel__head">
-        <h2>Requests <span class="count" id="requests-count">0</span></h2>
-        <select id="request-filter" aria-label="Filter requests by status">
-          <option value="pending" selected>Pending</option>
-          <option value="all">All</option>
-          <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
-        </select>
-      </div>
-      <p class="panel__hint">
-        Raw signups from the public form. Approving one creates a tester below.
-      </p>
+    <!-- Main Navigation Tabs -->
+    <nav class="nav-tabs" aria-label="Main navigation">
+      <button id="nav-tab-early-access" class="nav-tab nav-tab--active" type="button">Early Access</button>
+      <button id="nav-tab-financial" class="nav-tab" type="button">Financial</button>
+    </nav>
 
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Applicant</th><th>Experience</th><th>Received</th><th>Status</th><th>Actions</th></tr>
-          </thead>
-          <tbody id="requests-body"></tbody>
-        </table>
-      </div>
-    </section>
+    <!-- ======================================================== EARLY ACCESS SECTION -->
+    <div id="section-early-access">
+      <section class="panel">
+        <div class="panel__head">
+          <h2>Requests <span class="count" id="requests-count">0</span></h2>
+          <select id="request-filter" aria-label="Filter requests by status">
+            <option value="pending" selected>Pending</option>
+            <option value="all">All</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+        <p class="panel__hint">
+          Raw signups from the public form. Approving one creates a tester below.
+        </p>
 
-    <section class="panel">
-      <div class="panel__head">
-        <h2>
-          Testers <span class="count" id="testers-count">0</span>
-          <span class="count count--active" id="active-count">0 active</span>
-        </h2>
-        <select id="tester-filter" aria-label="Filter testers by active status">
-          <option value="all" selected>All</option>
-          <option value="active">Active only</option>
-          <option value="inactive">Not active only</option>
-        </select>
-      </div>
-      <p class="panel__hint">
-        Accepted testers. The <strong>active</strong> flag drives the Google Wallet
-        card state — deactivating issues a revoked pass.
-      </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Applicant</th><th>Experience</th><th>Received</th><th>Status</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="requests-body"></tbody>
+          </table>
+        </div>
+      </section>
 
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Tester</th><th>Status</th><th>Since</th><th>Reason</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="testers-body"></tbody>
-        </table>
-      </div>
-    </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h2>
+            Testers <span class="count" id="testers-count">0</span>
+            <span class="count count--active" id="active-count">0 active</span>
+          </h2>
+          <select id="tester-filter" aria-label="Filter testers by active status">
+            <option value="all" selected>All</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Not active only</option>
+          </select>
+        </div>
+        <p class="panel__hint">
+          Accepted testers. The <strong>active</strong> flag drives the Google Wallet
+          card state — deactivating issues a revoked pass.
+        </p>
 
-    <section class="panel">
-      <div class="panel__head">
-        <h2>Tester requests <span class="count" id="feedback-count">0</span></h2>
-        <select id="feedback-filter" aria-label="Filter feedback by area">
-          <option value="all" selected>All areas</option>
-          <option value="app">CRP Focus app</option>
-          <option value="product">Product</option>
-          <option value="hardware">Hardware</option>
-          <option value="other">Other</option>
-        </select>
-      </div>
-      <p class="panel__hint">
-        What testers have asked for, newest first. Testers are asked for at least
-        two a month — that is the activity the program runs on.
-      </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tester</th><th>Status</th><th>Since</th><th>Reason</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="testers-body"></tbody>
+          </table>
+        </div>
+      </section>
 
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Request</th><th>Tester</th><th>Area</th><th>Received</th></tr>
-          </thead>
-          <tbody id="feedback-body"></tbody>
-        </table>
+      <section class="panel">
+        <div class="panel__head">
+          <h2>Tester requests <span class="count" id="feedback-count">0</span></h2>
+          <select id="feedback-filter" aria-label="Filter feedback by area">
+            <option value="all" selected>All areas</option>
+            <option value="app">CRP Focus app</option>
+            <option value="product">Product</option>
+            <option value="hardware">Hardware</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <p class="panel__hint">
+          What testers have asked for, newest first. Testers are asked for at least
+          two a month — that is the activity the program runs on.
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Request</th><th>Tester</th><th>Area</th><th>Received</th></tr>
+            </thead>
+            <tbody id="feedback-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ======================================================== FINANCIAL SECTION -->
+    <div id="section-financial" hidden>
+      <!-- Subnav: Overview / Transactions / Recurring -->
+      <nav class="subnav-tabs" aria-label="Financial views">
+        <button id="subtab-financial-overview" class="subnav-tab subnav-tab--active" type="button">Overview</button>
+        <button id="subtab-financial-transactions" class="subnav-tab" type="button">Transactions</button>
+        <button id="subtab-financial-recurring" class="subnav-tab" type="button">Recurring</button>
+      </nav>
+
+      <!-- 1. FINANCIAL OVERVIEW VIEW -->
+      <div id="view-financial-overview">
+        <div class="financial-header">
+          <div>
+            <h2>Financial Overview</h2>
+            <p class="muted">Performance metrics, revenue, expenses, and Google Play installation analytics.</p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <div class="period-switcher">
+              <button id="btn-period-month" class="btn-period btn-period--active" type="button">Current Month</button>
+              <button id="btn-period-all" class="btn-period" type="button">All Time</button>
+            </div>
+            <button id="btn-refresh-overview" class="btn" type="button">Refresh</button>
+            <button id="btn-sync-shopify" class="btn" type="button">Sync Shopify</button>
+          </div>
+        </div>
+
+        <!-- Freshness Strip -->
+        <div class="freshness-strip">
+          <div class="freshness-card">
+            <div class="freshness-info">
+              <h4>Shopify Sales</h4>
+              <p id="freshness-shopify-time">Checking status…</p>
+            </div>
+            <span id="freshness-shopify-status" class="pill pill--freshness pill--not_configured">Not configured</span>
+          </div>
+          <div class="freshness-card">
+            <div class="freshness-info">
+              <h4>Google Play Console</h4>
+              <p id="freshness-play-time">Checking status…</p>
+            </div>
+            <span id="freshness-play-status" class="pill pill--freshness pill--not_configured">Not configured</span>
+          </div>
+          <div class="freshness-card">
+            <div class="freshness-info">
+              <h4>Firebase Analytics</h4>
+              <p id="freshness-analytics-time">Checking status…</p>
+            </div>
+            <span id="freshness-analytics-status" class="pill pill--freshness pill--not_configured">Not configured</span>
+          </div>
+        </div>
+
+        <!-- 4 Primary KPI Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-title">Total Installs</div>
+            <div class="kpi-value" id="kpi-installs">0</div>
+            <div class="kpi-subtitle">Google Play first-time installations</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">D7 Retention</div>
+            <div class="kpi-value" id="kpi-d7">—</div>
+            <div class="kpi-subtitle">Day 7 active cohort percentage</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">D30 Retention</div>
+            <div class="kpi-value" id="kpi-d30">—</div>
+            <div class="kpi-subtitle">Day 30 active cohort percentage</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-title">Active Recurring (MRR)</div>
+            <div class="kpi-value" id="kpi-mrr">₪0.00</div>
+            <div class="kpi-subtitle">Monthly equivalent recurring revenue</div>
+          </div>
+        </div>
+
+        <!-- Realized Financial Performance -->
+        <div class="summary-performance-grid">
+          <div class="summary-card">
+            <div class="summary-card-head">
+              <span class="kpi-title">Recognized Revenue</span>
+              <span class="pill pill--paid">Realized</span>
+            </div>
+            <div class="kpi-value" id="summary-revenue">₪0.00</div>
+            <p class="muted">Excludes pending and scheduled orders</p>
+          </div>
+          <div class="summary-card">
+            <div class="summary-card-head">
+              <span class="kpi-title">Recognized Expenses</span>
+              <span class="pill pill--expense">Realized</span>
+            </div>
+            <div class="kpi-value" id="summary-expenses">₪0.00</div>
+            <p class="muted">Infrastructure, software, hardware, and ops</p>
+          </div>
+          <div class="summary-card">
+            <div class="summary-card-head">
+              <span class="kpi-title">Net Profit</span>
+              <span class="pill">Recognized</span>
+            </div>
+            <div class="kpi-value" id="summary-net-profit">₪0.00</div>
+            <p class="muted">Revenue minus recognized expenses</p>
+          </div>
+        </div>
+
+        <!-- Status Breakdown Row -->
+        <section class="panel" style="padding-bottom: 1.25rem;">
+          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 0.5rem;">Transaction Realization Status</h3>
+          <div class="status-pill-row">
+            <span class="status-pill-item">Paid/Received: <strong id="sb-rev-paid">₪0.00</strong></span>
+            <span class="status-pill-item">Pending: <strong id="sb-rev-pending">₪0.00</strong></span>
+            <span class="status-pill-item">Scheduled: <strong id="sb-rev-scheduled">₪0.00</strong></span>
+            <span class="status-pill-item">Refunded: <strong id="sb-rev-refunded">₪0.00</strong></span>
+          </div>
+        </section>
+
+        <!-- Charts Grid -->
+        <div class="charts-grid">
+          <div class="chart-card">
+            <div class="chart-card-head">
+              <h3>Revenue vs. Expenses (12 Months)</h3>
+              <div class="chart-legend">
+                <span class="legend-item"><span class="legend-color" style="background: #1b5e20;"></span> Revenue</span>
+                <span class="legend-item"><span class="legend-color" style="background: #a1201a;"></span> Expenses</span>
+              </div>
+            </div>
+            <div id="chart-revenue-expenses"></div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-card-head">
+              <h3>Net Profit Trend (12 Months)</h3>
+              <div class="chart-legend">
+                <span class="legend-item"><span class="legend-color" style="background: #000000;"></span> Net Margin</span>
+              </div>
+            </div>
+            <div id="chart-net-profit"></div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-card-head">
+              <h3>App Installations over Time</h3>
+              <div class="chart-legend">
+                <span class="legend-item"><span class="legend-color" style="background: #2563eb;"></span> Daily Installs</span>
+              </div>
+            </div>
+            <div id="chart-installations"></div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-card-head">
+              <h3>D7 Cohort Retention Trend</h3>
+              <div class="chart-legend">
+                <span class="legend-item"><span class="legend-color" style="background: #10b981;"></span> D7 Retention %</span>
+              </div>
+            </div>
+            <div id="chart-retention"></div>
+          </div>
+        </div>
       </div>
-    </section>
+
+      <!-- 2. TRANSACTIONS VIEW -->
+      <div id="view-financial-transactions" hidden>
+        <section class="panel">
+          <div class="panel__head">
+            <h2>Transactions <span class="count" id="transactions-count">0</span></h2>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="btn-add-revenue" class="btn btn--approve" type="button">+ Add Revenue</button>
+              <button id="btn-add-expense" class="btn btn--reject" type="button">+ Add Expense</button>
+            </div>
+          </div>
+          <p class="panel__hint">
+            Realized, scheduled, and pending financial transactions in ILS reporting currency.
+          </p>
+
+          <!-- Toolbar & Filters -->
+          <div class="toolbar">
+            <input id="tx-search" type="search" class="toolbar-search" placeholder="Search description, notes, ID…">
+            <div class="toolbar-filters">
+              <select id="tx-type-filter" aria-label="Filter by type">
+                <option value="all">All Types</option>
+                <option value="revenue">Revenue only</option>
+                <option value="expense">Expense only</option>
+              </select>
+              <select id="tx-status-filter" aria-label="Filter by status">
+                <option value="all">All Statuses</option>
+                <option value="paid">Paid</option>
+                <option value="pending">Pending</option>
+                <option value="scheduled">Scheduled</option>
+                <option value="refunded">Refunded</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th>Category</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="transactions-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 3. RECURRING VIEW -->
+      <div id="view-financial-recurring" hidden>
+        <section class="panel">
+          <div class="panel__head">
+            <h2>Recurring Arrangements <span class="count" id="recurring-count">0</span></h2>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="btn-add-recurring" class="btn btn--primary" type="button">+ Add Recurring Rule</button>
+              <button id="btn-generate-occurrences" class="btn" type="button">⚡ Generate Due Occurrences</button>
+            </div>
+          </div>
+          <p class="panel__hint">
+            Active recurring revenue subscriptions and periodic software/hosting expenses.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>Type</th>
+                  <th>Frequency</th>
+                  <th>Original Amount</th>
+                  <th>ILS Amount</th>
+                  <th>Schedule</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="recurring-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
   </main>
+
+  <!-- MODALS -->
+
+  <!-- 1. Transaction Create / Edit Dialog -->
+  <dialog id="modal-transaction" class="request-details" aria-labelledby="modal-tx-title">
+    <div class="request-details__head">
+      <h2 id="modal-tx-title">Add Transaction</h2>
+      <button class="btn" type="button" onclick="document.getElementById('modal-transaction').close()">Close</button>
+    </div>
+    <form id="tx-form">
+      <div class="form-grid">
+        <div class="form-row">
+          <div class="form-field">
+            <label for="tx-type">Type</label>
+            <select id="tx-type" required>
+              <option value="revenue">Revenue</option>
+              <option value="expense">Expense</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="tx-status">Status</label>
+            <select id="tx-status" required>
+              <option value="paid">Paid / Received</option>
+              <option value="pending">Pending</option>
+              <option value="scheduled">Scheduled</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label for="tx-desc">Description</label>
+          <input id="tx-desc" type="text" placeholder="e.g. CUBY Hardware Sale or Google Cloud" required maxlength="250">
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="tx-amount">Amount</label>
+            <input id="tx-amount" type="number" step="0.01" min="0.01" placeholder="0.00" required>
+          </div>
+          <div class="form-field">
+            <label for="tx-currency">Currency</label>
+            <select id="tx-currency" required>
+              <option value="ILS" selected>ILS (₪)</option>
+              <option value="USD">USD ($)</option>
+              <option value="EUR">EUR (€)</option>
+              <option value="GBP">GBP (£)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="tx-rate">Exchange Rate (to ILS)</label>
+            <input id="tx-rate" type="number" step="0.0001" min="0.0001" value="1.0" disabled>
+          </div>
+          <div class="form-field">
+            <label for="tx-date">Transaction Date</label>
+            <input id="tx-date" type="date" required>
+          </div>
+        </div>
+
+        <div id="tx-ils-preview" class="form-preview">Converts to ₪0.00</div>
+
+        <div class="form-field">
+          <label for="tx-category">Category</label>
+          <select id="tx-category" required>
+            <option value="Hardware">Hardware</option>
+            <option value="CUBY sale">CUBY sale</option>
+            <option value="Software & Services">Software & Services</option>
+            <option value="Subscription">Subscription</option>
+            <option value="Infrastructure">Infrastructure</option>
+            <option value="APIs and AI">APIs and AI</option>
+            <option value="Marketing">Marketing</option>
+            <option value="Software">Software</option>
+            <option value="Domains and Hosting">Domains and Hosting</option>
+            <option value="Operations">Operations</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label for="tx-notes">Notes (optional)</label>
+          <textarea id="tx-notes" rows="2" placeholder="Reference, invoice number, or details"></textarea>
+        </div>
+
+        <button type="submit" class="btn btn--primary">Save Transaction</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 2. Recurring Definition Modal -->
+  <dialog id="modal-recurring" class="request-details" aria-labelledby="modal-rec-title">
+    <div class="request-details__head">
+      <h2 id="modal-rec-title">Add Recurring Arrangement</h2>
+      <button class="btn" type="button" onclick="document.getElementById('modal-recurring').close()">Close</button>
+    </div>
+    <form id="rec-form">
+      <div class="form-grid">
+        <div class="form-row">
+          <div class="form-field">
+            <label for="rec-type">Type</label>
+            <select id="rec-type" required>
+              <option value="revenue">Revenue</option>
+              <option value="expense" selected>Expense</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="rec-frequency">Frequency</label>
+            <select id="rec-frequency" required>
+              <option value="monthly" selected>Monthly</option>
+              <option value="weekly">Weekly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="annually">Annually</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label for="rec-desc">Description</label>
+          <input id="rec-desc" type="text" placeholder="e.g. Firebase or Customer SaaS Subscription" required maxlength="250">
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="rec-amount">Amount</label>
+            <input id="rec-amount" type="number" step="0.01" min="0.01" placeholder="0.00" required>
+          </div>
+          <div class="form-field">
+            <label for="rec-currency">Currency</label>
+            <select id="rec-currency" required>
+              <option value="ILS" selected>ILS (₪)</option>
+              <option value="USD">USD ($)</option>
+              <option value="EUR">EUR (€)</option>
+              <option value="GBP">GBP (£)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="rec-start-date">Start Date</label>
+            <input id="rec-start-date" type="date" required>
+          </div>
+          <div class="form-field">
+            <label for="rec-end-date">End Date (optional)</label>
+            <input id="rec-end-date" type="date">
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label for="rec-category">Category</label>
+          <select id="rec-category" required>
+            <option value="Infrastructure">Infrastructure</option>
+            <option value="APIs and AI">APIs and AI</option>
+            <option value="Software">Software</option>
+            <option value="Marketing">Marketing</option>
+            <option value="Domains and Hosting">Domains and Hosting</option>
+            <option value="Subscription">Subscription</option>
+            <option value="Operations">Operations</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        <button type="submit" class="btn btn--primary">Save Recurring Rule</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 3. Void Confirmation Dialog -->
+  <dialog id="modal-void-confirm" class="request-details">
+    <div class="request-details__head">
+      <h2>Void Transaction</h2>
+      <button class="btn" type="button" onclick="document.getElementById('modal-void-confirm').close()">Cancel</button>
+    </div>
+    <p>Are you sure you want to void this transaction? Voided transactions are cancelled and excluded from recognized revenue and expenses.</p>
+    <div style="margin-top: 1.25rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
+      <button class="btn" type="button" onclick="document.getElementById('modal-void-confirm').close()">Keep Transaction</button>
+      <button id="btn-confirm-void" class="btn btn--reject" type="button">Confirm Void</button>
+    </div>
+  </dialog>
+
+  <!-- 4. Reauthentication Step-Up Dialog -->
+  <dialog id="modal-reauth" class="request-details">
+    <div class="request-details__head">
+      <h2>Recent Authentication Required</h2>
+    </div>
+    <p class="muted">Access to sensitive financial data requires step-up reauthentication within the last 15 minutes.</p>
+    <form id="reauth-form" style="margin-top: 1rem;">
+      <div class="form-field">
+        <label for="reauth-password">Enter Admin Password</label>
+        <input id="reauth-password" type="password" required autocomplete="current-password">
+      </div>
+      <p id="reauth-error" class="login__error" style="margin-top: 0.4rem;"></p>
+      <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
+        <button class="btn" type="button" onclick="document.getElementById('modal-reauth').close()">Cancel</button>
+        <button type="submit" class="btn btn--primary">Verify & Continue</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="request-details" class="request-details" aria-labelledby="request-details-title">
     <div class="request-details__head">
@@ -138,8 +593,7 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <!-- Worker endpoint for the acceptance flow. Classic script so the global is
-       set before the module below runs. -->
+  <!-- Worker endpoint for the acceptance and financial flows. -->
   <script src="js/worker-config.js"></script>
   <script type="module" src="js/admin.js"></script>
 </body>

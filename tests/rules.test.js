@@ -633,6 +633,8 @@ test("unauthenticated visitors CANNOT read or write financial collections", asyn
   await assertFails(getDocs(collection(anon(), "financials")));
   await assertFails(getDoc(doc(anon(), "financials", "2026-summary")));
   await assertFails(setDoc(doc(anon(), "financials", "2026-summary"), { revenue: 50000 }));
+  await assertFails(getDocs(collection(anon(), "analytics")));
+  await assertFails(getDoc(doc(anon(), "analytics", "dailyCohorts")));
   await assertFails(getDocs(collection(anon(), "expenses")));
   await assertFails(getDocs(collection(anon(), "shopifyReports")));
   await assertFails(getDocs(collection(anon(), "playMetrics")));
@@ -641,6 +643,7 @@ test("unauthenticated visitors CANNOT read or write financial collections", asyn
 test("authenticated non-financial users and regular admins CANNOT read financials", async () => {
   await assertFails(getDocs(collection(asUser("u_regular", "user@example.com"), "financials")));
   await assertFails(getDocs(collection(asAdmin(), "financials")));
+  await assertFails(getDocs(collection(asAdmin(), "analytics")));
   await assertFails(getDocs(collection(asAdmin(), "expenses")));
 });
 
@@ -659,6 +662,13 @@ test("financial admin with recent auth CAN read and write financials", async () 
     }),
   );
   await assertSucceeds(getDoc(doc(ownerDb, "financials", "2026-summary")));
+  await assertSucceeds(
+    setDoc(doc(ownerDb, "analytics", "cohort_2026-11-01"), {
+      cohortSize: 120,
+      d7Retention: 38.5,
+    }),
+  );
+  await assertSucceeds(getDoc(doc(ownerDb, "analytics", "cohort_2026-11-01")));
 });
 
 test("financial admin with stale auth (> 15 minutes) CANNOT read financials", async () => {
@@ -670,6 +680,7 @@ test("financial admin with stale auth (> 15 minutes) CANNOT read financials", as
   const staleDb = staleOwnerContext.firestore();
 
   await assertFails(getDoc(doc(staleDb, "financials", "2026-summary")));
+  await assertFails(getDoc(doc(staleDb, "analytics", "cohort_2026-11-01")));
 });
 
 /* ------------------------------------------------- default deny for strays */

@@ -39,6 +39,7 @@ import {
 } from "./tester-portal.js";
 import { buildSaveUrl, accountIdFor, ISSUER_ID } from "./wallet.js";
 import { activeForStatus } from "./tester-lifecycle.js";
+import { handleFinancial } from "./financial-routes.js";
 
 const USERS = "users";
 
@@ -108,7 +109,7 @@ const ALLOWED_REQUEST_HEADERS = "Authorization, Content-Type";
 function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": ALLOWED_REQUEST_HEADERS,
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
@@ -584,7 +585,9 @@ export default {
       url.pathname === "/tester-check" ||
       url.pathname === "/feedback";
 
-    if (url.pathname !== "/send" && !isAdminRoute && !isTesterRoute) {
+    const isFinancialRoute = url.pathname.startsWith("/financial/");
+
+    if (url.pathname !== "/send" && !isAdminRoute && !isTesterRoute && !isFinancialRoute) {
       return json(404, { ok: false, error: "Not found." });
     }
 
@@ -592,16 +595,21 @@ export default {
       return handleOptions(request, env);
     }
 
-    if (request.method !== "POST") {
+    if (request.method !== "POST" && !isFinancialRoute) {
       return json(405, { ok: false, error: "Method not allowed." });
     }
 
     // Origin check first: this endpoint relays email, so it must not be
-    // callable from arbitrary sites. The admin routes additionally require a
-    // verified staff token, which is the real control.
+    // callable from arbitrary sites. Webhooks don't send browser Origin headers.
+    const isShopifyWebhook = url.pathname === "/financial/shopify/webhook";
     const origin = request.headers.get("Origin");
-    if (!isAllowedOrigin(origin, allowedOrigins(env))) {
+    if (!isShopifyWebhook && !isAllowedOrigin(origin, allowedOrigins(env))) {
       return json(403, { ok: false, error: "Origin not allowed." });
+    }
+
+    // Financial routes handler
+    if (isFinancialRoute) {
+      return handleFinancial(request, url, env, json, origin);
     }
 
     // Past this point the origin is known-good, so echoing it back is safe and
