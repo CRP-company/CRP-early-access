@@ -28,6 +28,7 @@ const {
   // to erase the record of having been a tester.
   deleteField,
   serverTimestamp,
+  writeBatch,
 } = require("firebase/firestore");
 
 const PROJECT = process.env.GCLOUD_PROJECT || "crp-cuby-display";
@@ -185,18 +186,17 @@ for (const field of ADMIN_CONTROLLED) {
 test("concurrent submissions atomically keep one request and its marker", async () => {
   const db = anon();
   const markerRef = doc(db, "requestEmails", `race-${Date.now()}`);
-  const submit = () => runTransaction(db, async (transaction) => {
-    const marker = await transaction.get(markerRef);
-    if (marker.exists()) throw new Error("duplicate application");
-
+  const submit = async () => {
     const requestRef = doc(collection(db, "requests"));
-    transaction.set(requestRef, validRequest());
-    transaction.set(markerRef, {
+    const batch = writeBatch(db);
+    batch.set(requestRef, validRequest());
+    batch.set(markerRef, {
       requestId: requestRef.id,
       createdAt: serverTimestamp(),
     });
+    await batch.commit();
     return requestRef.id;
-  });
+  };
 
   const results = await Promise.allSettled([submit(), submit()]);
   const accepted = results.filter((result) => result.status === "fulfilled");
@@ -204,8 +204,8 @@ test("concurrent submissions atomically keep one request and its marker", async 
     throw new Error(`Expected one concurrent submission, received ${accepted.length}.`);
   }
 
-  const marker = await getDoc(markerRef);
-  if (!marker.exists() || marker.data().requestId !== accepted[0].value) {
+  const marker = await adminDb.doc(markerRef.path).get();
+  if (!marker.exists || marker.data().requestId !== accepted[0].value) {
     throw new Error("The email marker does not point to the accepted request.");
   }
   const request = await adminDb.doc(`requests/${accepted[0].value}`).get();
@@ -219,14 +219,14 @@ test("a rejected applicant can submit a new request without changing the old one
   const email = `reapply-${Date.now()}@example.com`;
   const emailKey = require("node:crypto").createHash("sha256").update(email).digest("hex");
   const markerRef = doc(db, "requestEmails", emailKey);
-  const submit = () => runTransaction(db, async (transaction) => {
-    const marker = await transaction.get(markerRef);
-    if (marker.exists()) throw new Error("duplicate application");
+  const submit = async () => {
     const requestRef = doc(collection(db, "requests"));
-    transaction.set(requestRef, validRequest({ email }));
-    transaction.set(markerRef, { requestId: requestRef.id, createdAt: serverTimestamp() });
+    const batch = writeBatch(db);
+    batch.set(requestRef, validRequest({ email }));
+    batch.set(markerRef, { requestId: requestRef.id, createdAt: serverTimestamp() });
+    await batch.commit();
     return requestRef.id;
-  });
+  };
 
   const rejectedRequestId = await submit();
   await adminDb.doc(`requests/${rejectedRequestId}`).update({
@@ -440,14 +440,28 @@ test("nobody can write the audit trail from a client", async () => {
 
 /* --------------------------------------------------------------- email index */
 
-test("anonymous can create the email marker but not enumerate the collection", async () => {
-  await assertSucceeds(
-    setDoc(doc(anon(), "requestEmails", "hash-abc"), {
-      requestId: "req-1",
+test("anonymous can create the email marker alongside a request but not enumerate or probe", async () => {
+  const db = anon();
+  const requestRef = doc(collection(db, "requests"));
+  const batch = writeBatch(db);
+  batch.set(requestRef, validRequest());
+  batch.set(doc(db, "requestEmails", "hash-abc"), {
+    requestId: requestRef.id,
+    createdAt: serverTimestamp(),
+  });
+  await assertSucceeds(batch.commit());
+  await assertFails(getDocs(collection(db, "requestEmails")));
+  await assertFails(getDoc(doc(db, "requestEmails", "hash-abc")));
+  await assertSucceeds(getDoc(doc(asAdmin(), "requestEmails", "hash-abc")));
+});
+
+test("anonymous visitor CANNOT squat on an email marker without a valid request", async () => {
+  await assertFails(
+    setDoc(doc(anon(), "requestEmails", "squat-hash"), {
+      requestId: "non-existent-request-id",
       createdAt: serverTimestamp(),
     }),
   );
-  await assertFails(getDocs(collection(anon(), "requestEmails")));
 });
 
 test("email marker cannot carry extra fields", async () => {
@@ -555,9 +569,10 @@ test("admin CAN read all feedback", async () => {
 
 /* ------------------------------------------------------------- tester index */
 
-test("anonymous can read a tester index pointer but not enumerate it", async () => {
-  await assertSucceeds(getDoc(doc(anon(), "testerIndex", "hash-abc")));
+test("anonymous CANNOT read a tester index pointer or enumerate it", async () => {
+  await assertFails(getDoc(doc(anon(), "testerIndex", "hash-abc")));
   await assertFails(getDocs(collection(anon(), "testerIndex")));
+  await assertSucceeds(getDoc(doc(asAdmin(), "testerIndex", "hash-abc")));
 });
 
 test("nobody can write the tester index from a client", async () => {
@@ -610,6 +625,51 @@ test("a user CAN rename their own account", async () => {
       displayName: "renamed",
     }),
   );
+});
+
+/* ------------------------------------------------ financial data protection */
+
+test("unauthenticated visitors CANNOT read or write financial collections", async () => {
+  await assertFails(getDocs(collection(anon(), "financials")));
+  await assertFails(getDoc(doc(anon(), "financials", "2026-summary")));
+  await assertFails(setDoc(doc(anon(), "financials", "2026-summary"), { revenue: 50000 }));
+  await assertFails(getDocs(collection(anon(), "expenses")));
+  await assertFails(getDocs(collection(anon(), "shopifyReports")));
+  await assertFails(getDocs(collection(anon(), "playMetrics")));
+});
+
+test("authenticated non-financial users and regular admins CANNOT read financials", async () => {
+  await assertFails(getDocs(collection(asUser("u_regular", "user@example.com"), "financials")));
+  await assertFails(getDocs(collection(asAdmin(), "financials")));
+  await assertFails(getDocs(collection(asAdmin(), "expenses")));
+});
+
+test("financial admin with recent auth CAN read and write financials", async () => {
+  const recentAuthTime = Math.floor(Date.now() / 1000) - 60; // 1 minute ago
+  const ownerContext = testEnv.authenticatedContext("owner_uid", {
+    role: "owner",
+    auth_time: recentAuthTime,
+  });
+  const ownerDb = ownerContext.firestore();
+
+  await assertSucceeds(
+    setDoc(doc(ownerDb, "financials", "2026-summary"), {
+      revenue: 50000,
+      currency: "USD",
+    }),
+  );
+  await assertSucceeds(getDoc(doc(ownerDb, "financials", "2026-summary")));
+});
+
+test("financial admin with stale auth (> 15 minutes) CANNOT read financials", async () => {
+  const staleAuthTime = Math.floor(Date.now() / 1000) - 1000; // > 16 minutes ago
+  const staleOwnerContext = testEnv.authenticatedContext("owner_uid", {
+    role: "owner",
+    auth_time: staleAuthTime,
+  });
+  const staleDb = staleOwnerContext.firestore();
+
+  await assertFails(getDoc(doc(staleDb, "financials", "2026-summary")));
 });
 
 /* ------------------------------------------------- default deny for strays */

@@ -244,25 +244,28 @@ describe("MONTHLY_TARGET", () => {
   });
 });
 
+const TEST_ADMINS = "atronamir5@gmail.com, idogaldavid@gmail.com";
+
 describe("admin allowlist", () => {
   it("permits the two CRP staff addresses", () => {
-    expect(isAllowedAdminEmail("atronamir5@gmail.com")).toBe(true);
-    expect(isAllowedAdminEmail("idogaldavid@gmail.com")).toBe(true);
+    expect(isAllowedAdminEmail("atronamir5@gmail.com", TEST_ADMINS)).toBe(true);
+    expect(isAllowedAdminEmail("idogaldavid@gmail.com", TEST_ADMINS)).toBe(true);
   });
 
   it("is case-insensitive", () => {
-    expect(isAllowedAdminEmail("AtronAmir5@Gmail.com")).toBe(true);
+    expect(isAllowedAdminEmail("AtronAmir5@Gmail.com", TEST_ADMINS)).toBe(true);
   });
 
   it("refuses anyone else, including a holder of the admin claim", () => {
-    expect(isAllowedAdminEmail("someone.else@gmail.com")).toBe(false);
-    expect(isAllowedAdminEmail("attacker@evil.com")).toBe(false);
+    expect(isAllowedAdminEmail("someone.else@gmail.com", TEST_ADMINS)).toBe(false);
+    expect(isAllowedAdminEmail("attacker@evil.com", TEST_ADMINS)).toBe(false);
   });
 
   // The default must not be "allow everyone" — an unset variable has to fail closed.
-  it("falls back to the built-in list when unset or blank", () => {
-    expect(adminEmails(undefined)).toEqual(["atronamir5@gmail.com", "idogaldavid@gmail.com"]);
-    expect(adminEmails("   ")).toEqual(["atronamir5@gmail.com", "idogaldavid@gmail.com"]);
+  it("fails closed to an empty list when unset or blank", () => {
+    expect(adminEmails(undefined)).toEqual([]);
+    expect(adminEmails("   ")).toEqual([]);
+    expect(isAllowedAdminEmail("atronamir5@gmail.com", undefined)).toBe(false);
   });
 
   // A near-miss address must NOT pass. The real allowlist shipped with

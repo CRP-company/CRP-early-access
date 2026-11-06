@@ -26,6 +26,15 @@ service cloud.firestore {
         && request.auth.token.admin == true;
     }
 
+    // Financial / Sensitive Operations admin: must have role == 'owner'
+    // or carry explicit financials permission, and must have authenticated
+    // recently (within 15 minutes / 900 seconds) to prevent stale session abuse.
+    function isFinancialAdmin() {
+      return request.auth != null
+        && (request.auth.token.role == "owner" || (isAdmin() && request.auth.token.financials == true))
+        && request.auth.token.auth_time > (request.time.toMillis() / 1000) - 900;
+    }
+
     // NOTE: there is deliberately no `isSelf(email)` helper. Matching a document
     // against `request.auth.token.email` is weaker than matching the uid, because
     // an email is a mutable profile field while a uid is issued by Firebase. Every
@@ -134,37 +143,30 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
-    // A public "did I already apply" marker, so a repeat visitor is told they
-    // are already queued instead of silently creating a second row.
+    // A deduplication marker doc per applicant email. Prevents duplicate applications
+    // and race conditions on the public form.
     //
-    // The document id is a SHA-256 hash of the lowercased email, and the body
-    // holds only a request id and a timestamp — no name, no email address. So
-    // `get` here leaks no personal data; `list` stays denied so the collection
-    // cannot be enumerated.
+    // Security: Only admins may read (get/list) to prevent unauthenticated enumeration
+    // of applicant email hashes. Anonymous clients create atomically alongside a valid
+    // request document, preventing squatting and reservation attacks.
     match /requestEmails/{emailKey} {
-      allow get: if true;
-      allow list: if isAdmin();
-      allow create: if request.resource.data.keys().hasOnly(['requestId', 'createdAt'])
+      allow get, list: if isAdmin();
+      allow create: if !exists(/databases/$(database)/documents/requestEmails/$(emailKey))
+        && request.resource.data.keys().hasOnly(['requestId', 'createdAt'])
         && request.resource.data.requestId is string
-        && request.resource.data.createdAt == request.time;
+        && request.resource.data.createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/requests/$(request.resource.data.requestId));
       allow update, delete: if false;
     }
 
     // ----------------------------------------------------------- tester index
-    // A deterministic email -> testerId pointer, so a signed-in tester can find
-    // their own record without being able to `list` the roster.
+    // A deterministic email -> testerId pointer.
     //
-    // `allow list: if isAdmin()` on `testers` is what makes this necessary: a
-    // tester may `get` their document but cannot query for it, because a query
-    // they could shape would also let them read anyone else's. Mirrors the
-    // existing requestEmails marker exactly.
-    //
-    // The body holds only the tester document id — no name, no address — so this
-    // `get` leaks no personal data. `list` stays denied so the index cannot be
-    // enumerated and turned back into an email directory.
+    // Security: Restricted to admin get/list. Unauthenticated enumeration is blocked
+    // to prevent discovery of tester membership and harvesting of internal user UIDs.
+    // The Worker accesses this via Admin SDK which bypasses security rules.
     match /testerIndex/{emailKey} {
-      allow get: if true;
-      allow list: if isAdmin();
+      allow get, list: if isAdmin();
       allow write: if false;
     }
 
@@ -265,6 +267,22 @@ service cloud.firestore {
     match /audit/{entryId} {
       allow read: if isAdmin();
       allow write: if false;
+    }
+
+    // ------------------------------------------------- financial & analytics
+    // Sensitive company data: Google Play analytics, Shopify revenue, company expenses.
+    // Accessible only to verified owners with recent authentication (step-up auth).
+    match /financials/{document=**} {
+      allow read, write: if isFinancialAdmin();
+    }
+    match /expenses/{document=**} {
+      allow read, write: if isFinancialAdmin();
+    }
+    match /shopifyReports/{document=**} {
+      allow read, write: if isFinancialAdmin();
+    }
+    match /playMetrics/{document=**} {
+      allow read, write: if isFinancialAdmin();
     }
 
     // Default deny for anything not explicitly matched above.

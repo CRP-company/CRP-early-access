@@ -23,6 +23,10 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  setPersistence,
+  browserSessionPersistence,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 import {
   getFirestore,
@@ -532,12 +536,36 @@ async function removeTester(userId, button) {
 
   setBusy(button, true);
   try {
-    const token = await auth.currentUser.getIdToken(true);
-    const result = await postToWorker({
-      url: `${WORKER_URL}/tester-remove`,
-      token,
-      body: { userId, reason },
-    });
+    let token = await auth.currentUser.getIdToken(true);
+    let result;
+    try {
+      result = await postToWorker({
+        url: `${WORKER_URL}/tester-remove`,
+        token,
+        body: { userId, reason },
+      });
+    } catch (error) {
+      if (error?.message?.includes("Recent reauthentication required") || error?.requireReauth) {
+        const password = prompt(
+          "Step-up reauthentication required for destructive operations.\n" +
+          "Enter your admin password to confirm removal:",
+        );
+        if (!password) {
+          toast("Removal aborted: reauthentication required.", "warn");
+          return;
+        }
+        const cred = EmailAuthProvider.credential(auth.currentUser.email, password);
+        await reauthenticateWithCredential(auth.currentUser, cred);
+        token = await auth.currentUser.getIdToken(true);
+        result = await postToWorker({
+          url: `${WORKER_URL}/tester-remove`,
+          token,
+          body: { userId, reason },
+        });
+      } else {
+        throw error;
+      }
+    }
 
     if (result.alreadyRemoved) {
       toast("Already removed — nothing changed.", "warn");
@@ -693,6 +721,33 @@ if (!isConfigured()) {
   const app = initializeApp(firebaseConfig, "admin");
   auth = getAuth(app);
   db = getFirestore(app);
+
+  // VULN-07: Use browser session persistence so closing the tab ends the admin session
+  setPersistence(auth, browserSessionPersistence).catch((err) => {
+    console.warn("Could not set admin session persistence:", err);
+  });
+
+  // VULN-07: Idle session timeout — 15 minutes of inactivity automatically signs out the staff member
+  const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+  let lastActivity = Date.now();
+  const resetTimer = () => {
+    lastActivity = Date.now();
+  };
+  ["mousedown", "keydown", "scroll", "touchstart"].forEach((evt) => {
+    window.addEventListener(evt, resetTimer, { passive: true });
+  });
+
+  setInterval(async () => {
+    if (auth?.currentUser && Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+      try {
+        await signOut(auth);
+        els.loginError.textContent = "Session timed out due to 15 minutes of inactivity. Please sign in again.";
+        showLogin();
+      } catch (err) {
+        console.warn("Inactivity signout error:", err);
+      }
+    }
+  }, 30000);
 
   onAuthStateChanged(auth, async (user) => {
     if (!user) return showLogin();

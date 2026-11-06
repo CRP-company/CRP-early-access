@@ -9,7 +9,7 @@
  * deactivated tester gets a REVOKED card.
  *
  * Run with the service account JSON in the environment:
- *   GOOGLE_APPLICATION_CREDENTIALS_JSON="$(cat crp-tester-card-*.json)" \
+ *   GOOGLE_APPLICATION_CREDENTIALS_JSON="$SERVICE_ACCOUNT_JSON" \
  *     node scripts/verify-wallet.js
  */
 

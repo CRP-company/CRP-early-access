@@ -22,6 +22,7 @@
 import { buildApplicationReceivedEmail } from "./email-template.js";
 import { validateSignup, isAllowedOrigin } from "./validate.js";
 import { sendEmail } from "./resend.js";
+import { checkRateLimit, getClientIp } from "./rate-limit.js";
 import { createFirestore } from "./firestore-rest.js";
 import { requireAdmin, requireUser, AuthError } from "./auth.js";
 import { isAllowedAdminEmail } from "./admin-access.js";
@@ -114,7 +115,7 @@ function corsHeaders(origin) {
   };
 }
 
-const json = (status, payload, origin) =>
+const json = (status, payload, origin, extraHeaders = {}) =>
   new Response(JSON.stringify(payload), {
     status,
     headers: {
@@ -126,6 +127,7 @@ const json = (status, payload, origin) =>
       // JavaScript. Omitted entirely for a disallowed origin, so such a caller
       // cannot read the body at all.
       ...(origin ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" } : {}),
+      ...extraHeaders,
     },
   });
 
@@ -172,6 +174,44 @@ async function handleTester(request, env, body, route, origin) {
   const sa = env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (!sa) return json(500, { ok: false, error: "Server not configured." }, origin);
 
+  // /tester-check: is this address on the roster, and may it create a password?
+  //
+  // Deliberately does NOT require a token, because its whole purpose is to be
+  // called *before* someone has one — that is the "you have no password yet" path.
+  // It returns only a minimal boolean confirmation, never exposing names, UIDs,
+  // or personal details.
+  if (route === "/tester-check") {
+    const clientIp = getClientIp(request);
+    const rl = await checkRateLimit("/tester-check", clientIp, env);
+    if (!rl.allowed) {
+      return json(
+        429,
+        { ok: false, error: "Too many requests. Please try again later." },
+        origin,
+        { "Retry-After": String(rl.retryAfterSeconds) },
+      );
+    }
+
+    const requested = body && typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!requested) return json(400, { ok: false, error: "email is required." }, origin);
+
+    const store = createFirestore(sa, projectId);
+    const tester = await findTesterByEmail(store, requested);
+    if (!tester) {
+      return json(404, { ok: false, error: "That email is not on the CRP tester list." }, origin);
+    }
+    const permission = canSubmitFeedback(tester);
+    if (!permission.allowed) {
+      return json(
+        403,
+        { ok: false, error: "That tester account is not currently active." },
+        origin,
+      );
+    }
+    // Return only eligibility status — no name, uid, or PII
+    return json(200, { ok: true, eligible: true }, origin);
+  }
+
   let caller;
   try {
     caller = await requireUser(request, projectId);
@@ -187,33 +227,6 @@ async function handleTester(request, env, body, route, origin) {
   // data can never drift onto different projects.
   const store = createFirestore(sa, projectId);
 
-  // /tester-check: is this address on the roster, and may it create a password?
-  //
-  // Deliberately does NOT require a token, because its whole purpose is to be
-  // called *before* someone has one — that is the "you have no password yet" path.
-  // It reveals only whether an address is an active tester, which is the same
-  // thing the person already knows about themselves, and it never returns the
-  // roster. `activeForStatus` means a revoked tester cannot use this to
-  // re-provision themselves.
-  if (route === "/tester-check") {
-    const requested = body && typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-    if (!requested) return json(400, { ok: false, error: "email is required." }, origin);
-
-    const tester = await findTesterByEmail(store, requested);
-    if (!tester) {
-      return json(404, { ok: false, error: "That email is not on the CRP tester list." }, origin);
-    }
-    const permission = canSubmitFeedback(tester);
-    if (!permission.allowed) {
-      return json(
-        403,
-        { ok: false, error: "That tester account is not currently active." },
-        origin,
-      );
-    }
-    return json(200, { ok: true, onRoster: true, name: tester.name || null }, origin);
-  }
-
   const tester = await findTesterByEmail(store, email);
   if (!tester) {
     return json(
@@ -225,6 +238,13 @@ async function handleTester(request, env, body, route, origin) {
 
   // /tester-me: everything the dashboard needs on load, in one call.
   if (route === "/tester-me") {
+    const rl = await checkRateLimit("/tester-me", caller.uid, env);
+    if (!rl.allowed) {
+      return json(429, { ok: false, error: "Too many requests. Please slow down." }, origin, {
+        "Retry-After": String(rl.retryAfterSeconds),
+      });
+    }
+
     const permission = canSubmitFeedback(tester);
     // Feedback hangs off the user document, not the tester id, because `tester` is
     // a map on `users/{uid}` and has no path of its own.
@@ -269,6 +289,12 @@ async function handleTester(request, env, body, route, origin) {
   // Revoked and removed testers are refused here, not just hidden in the UI, so
   // holding an open tab from before a revocation does not grant extra submissions.
   if (route === "/feedback") {
+    const rl = await checkRateLimit("/feedback", caller.uid, env);
+    if (!rl.allowed) {
+      return json(429, { ok: false, error: "Feedback submission rate limit exceeded." }, origin, {
+        "Retry-After": String(rl.retryAfterSeconds),
+      });
+    }
     const permission = canSubmitFeedback(tester);
     if (!permission.allowed) {
       return json(
@@ -395,6 +421,20 @@ async function handleAdmin(request, env, body, route, origin) {
   // protection, so a confirmation has to be deliberate. It stays behind the same
   // requireAdmin() check as every other admin route.
   if (route === "/tester-remove") {
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Destructive operation: require step-up authentication if the session is older than 15 minutes.
+    if (admin.authTime && admin.authTime < nowSec - 900) {
+      return json(
+        401,
+        {
+          ok: false,
+          error: "Recent reauthentication required for destructive operations. Please sign in again.",
+          requireReauth: true,
+        },
+        origin,
+      );
+    }
+
     const { userId, reason } = body || {};
     const result = await removeTester(store, {
       userId,
@@ -621,14 +661,44 @@ export default {
       }
     }
 
-    // The admin routes returned above; everything here is the public /send path,
-    // which validates its own payload and never touches Firestore.
+    // The admin routes returned above; everything here is the public /send path.
+    // 1. IP Rate Limiting
+    const clientIp = getClientIp(request);
+    const rl = await checkRateLimit("/send", clientIp, env);
+    if (!rl.allowed) {
+      return json(
+        429,
+        { ok: false, error: "Too many requests. Please try again later." },
+        origin,
+        { "Retry-After": String(rl.retryAfterSeconds) },
+      );
+    }
+
     const result = validateSignup(body);
     if (!result.ok) {
       return json(400, { ok: false, error: result.error }, origin);
     }
 
     const { name, email, requestId } = result.value;
+
+    // 2. Validate Firestore Request state if database credentials exist
+    if (env.FIREBASE_SERVICE_ACCOUNT_JSON && env.FIREBASE_PROJECT_ID) {
+      const store = createFirestore(env.FIREBASE_SERVICE_ACCOUNT_JSON, env.FIREBASE_PROJECT_ID);
+      const reqDoc = await store.getDocument("requests", requestId);
+      if (!reqDoc) {
+        return json(404, { ok: false, error: "Application request not found." }, origin);
+      }
+      if (reqDoc.status !== "pending") {
+        return json(400, { ok: false, error: "Request is no longer pending." }, origin);
+      }
+      if (String(reqDoc.email || "").trim().toLowerCase() !== email.trim().toLowerCase()) {
+        return json(403, { ok: false, error: "Request email mismatch." }, origin);
+      }
+      if (reqDoc.acknowledgementSentAt) {
+        // Idempotent: already sent
+        return json(200, { ok: true, id: reqDoc.acknowledgementResendId || "already-sent" }, origin);
+      }
+    }
 
     const { subject, html, text } = buildApplicationReceivedEmail(
       { name, email },
@@ -663,6 +733,24 @@ export default {
     }
 
     console.log("acknowledgement sent", JSON.stringify({ requestId, id: sent.id }));
+
+    // Record acknowledgement sent on Firestore document
+    if (env.FIREBASE_SERVICE_ACCOUNT_JSON && env.FIREBASE_PROJECT_ID) {
+      try {
+        const store = createFirestore(env.FIREBASE_SERVICE_ACCOUNT_JSON, env.FIREBASE_PROJECT_ID);
+        await store.updateDocument(
+          "requests",
+          requestId,
+          {
+            acknowledgementSentAt: new Date().toISOString(),
+            acknowledgementResendId: sent.id,
+          },
+          { exists: true },
+        );
+      } catch (patchErr) {
+        console.warn("Could not record acknowledgement timestamp on request", requestId, patchErr);
+      }
+    }
 
     return json(200, { ok: true, id: sent.id }, origin);
   },

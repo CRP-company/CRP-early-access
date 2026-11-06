@@ -57,8 +57,7 @@ h2 { font-size: 1.05rem; font-weight: 500; }
   width: 100%;
   max-width: 380px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 25px;
   padding: 2rem;
   display: grid;
   gap: 0.6rem;
@@ -121,8 +120,7 @@ h2 { font-size: 1.05rem; font-weight: 500; }
 
 .panel {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 25px;
   padding: 1.25rem 1.25rem 0.5rem;
   margin-bottom: 1.5rem;
 }

@@ -23,7 +23,9 @@
 	"vars": {
 		"ALLOWED_ORIGINS": "https://crp-company.github.io",
 		"CRP_EMAIL_FROM": "CRP Tester Program <testing@crp.company>",
-		"FIREBASE_PROJECT_ID": "crp-cuby-display"
+		"FIREBASE_PROJECT_ID": "crp-cuby-display",
+		"ADMIN_EMAILS": "atronamir5@gmail.com,idogaldavid@gmail.com",
+		"RATE_LIMITING": "true"
 	}
 	/**
 	 * Static Assets

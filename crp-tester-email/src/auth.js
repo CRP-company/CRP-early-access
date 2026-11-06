@@ -90,7 +90,13 @@ export async function requireAdmin(request, projectId) {
     throw new AuthError(403, "This action is restricted to CRP staff.");
   }
 
-  return { uid: payload.user_id || payload.sub || "", email: payload.email || "" };
+  const result = { uid: payload.user_id || payload.sub || "", email: payload.email || "" };
+  Object.defineProperty(result, "authTime", {
+    value: payload.auth_time || 0,
+    enumerable: false,
+    writable: true,
+  });
+  return result;
 }
 
 /**
