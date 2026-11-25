@@ -76,6 +76,7 @@ export function initFinancial(auth, url) {
   setupNavTabs();
   setupEventListeners();
   loadAllFinancialData();
+  checkShopifyOAuthCallback();
 }
 
 /**
@@ -154,6 +155,26 @@ function setupEventListeners() {
     loadAllFinancialData();
   });
 
+  // Shopify OAuth Connect Button
+  document.getElementById("btn-connect-shopify")?.addEventListener("click", async (e) => {
+    const btn = e.target;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Connecting…";
+    try {
+      const res = await callWorker("/financial/shopify/auth");
+      if (res && res.authorizeUrl) {
+        window.location.href = res.authorizeUrl;
+      } else {
+        throw new Error(res?.error || "Failed to obtain Shopify authorization URL.");
+      }
+    } catch (err) {
+      showToast(err.message, "error");
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
+
   // Shopify Manual Sync Button
   document.getElementById("btn-sync-shopify")?.addEventListener("click", async (e) => {
     const btn = e.target;
@@ -227,23 +248,49 @@ function setupEventListeners() {
     const amt = Number(txAmountInput?.value) || 0;
     const curr = txCurrencySelect?.value || "ILS";
     let rate = Number(txRateInput?.value);
-    if (!rate || rate <= 0) {
-      rate = curr === "ILS" ? 1.0 : getDefaultExchangeRate(curr);
-      if (txRateInput) txRateInput.value = rate;
+
+    if (curr === "ILS") {
+      if (txRateInput) {
+        txRateInput.value = "1.0";
+        txRateInput.disabled = true;
+      }
+      if (txPreview) {
+        txPreview.textContent = `Converts to ${formatILS(amt)}`;
+        txPreview.style.color = "";
+      }
+      return;
     }
-    const converted = curr === "ILS" ? amt : amt * rate;
-    if (txPreview) {
-      txPreview.textContent = `Converts to ${formatILS(converted)}`;
+
+    if (txRateInput) txRateInput.disabled = false;
+
+    if (!rate || rate <= 0) {
+      if (txPreview) {
+        txPreview.textContent = `Requires confirmed exchange rate for ${curr}`;
+        txPreview.style.color = "#b91c1c";
+      }
+    } else {
+      const converted = amt * rate;
+      if (txPreview) {
+        txPreview.textContent = `Converts to ${formatILS(converted)} (@ ${rate} ILS/${curr})`;
+        txPreview.style.color = "";
+      }
     }
   }
 
   txAmountInput?.addEventListener("input", updateTxPreview);
   txCurrencySelect?.addEventListener("change", (e) => {
     const curr = e.target.value;
-    const defaultRate = curr === "ILS" ? 1.0 : getDefaultExchangeRate(curr);
     if (txRateInput) {
-      txRateInput.value = defaultRate;
-      txRateInput.disabled = curr === "ILS";
+      if (curr === "ILS") {
+        txRateInput.value = "1.0";
+        txRateInput.disabled = true;
+      } else {
+        txRateInput.disabled = false;
+        if (txRateInput.value === "1.0" || txRateInput.value === "1") {
+          txRateInput.value = "";
+        }
+        txRateInput.placeholder = "e.g. 3.70";
+      }
     }
     updateTxPreview();
   });
@@ -359,6 +406,38 @@ function renderOverview() {
   renderNetProfitChart(charts?.financials || []);
   renderInstallationsChart(charts?.installations || []);
   renderRetentionChart(charts?.cohorts || []);
+
+  // 6. Unconfirmed Foreign Transactions Warning Banner
+  const banner = document.getElementById("banner-unconfirmed-amounts");
+  const bannerText = document.getElementById("banner-unconfirmed-text");
+  const btnViewUnconfirmed = document.getElementById("btn-view-unconfirmed");
+
+  if (banner) {
+    if (summary?.hasUnconfirmedAmounts && summary.unconfirmedCount > 0) {
+      banner.style.display = "block";
+      const count = summary.unconfirmedCount;
+      const foreignDetails = Object.entries(summary.unconfirmedForeignTotals || {})
+        .map(([c, amt]) => formatCurrency(amt, c))
+        .join(", ");
+      const detailsSuffix = foreignDetails ? ` (Total pending: ${foreignDetails})` : "";
+      if (bannerText) {
+        bannerText.textContent = `There ${count === 1 ? "is" : "are"} ${count} foreign-currency transaction${count === 1 ? "" : "s"}${detailsSuffix} without a confirmed ILS exchange rate. These amounts are excluded from recognized ILS revenue until confirmed.`;
+      }
+      if (btnViewUnconfirmed) {
+        btnViewUnconfirmed.onclick = () => {
+          document.getElementById("subtab-financial-transactions")?.click();
+          const statusFilter = document.getElementById("tx-status-filter");
+          if (statusFilter) {
+            statusFilter.value = "pending";
+            txFilter.status = "pending";
+            renderTransactionsTable();
+          }
+        };
+      }
+    } else {
+      banner.style.display = "none";
+    }
+  }
 }
 
 function renderFreshness(name, info) {
@@ -376,6 +455,13 @@ function renderFreshness(name, info) {
       syncTime.textContent = `Last sync: ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     } else {
       syncTime.textContent = status === "not_configured" ? "Needs API configuration" : "No sync recorded";
+    }
+  }
+
+  if (name === "shopify") {
+    const btnConnect = document.getElementById("btn-connect-shopify");
+    if (btnConnect) {
+      btnConnect.textContent = info?.connected ? "Reconnect Shopify" : "Connect Shopify";
     }
   }
 }
@@ -611,8 +697,17 @@ function renderTransactionsTable() {
   tbody.innerHTML = filtered.map((t) => {
     const isRev = t.type === "revenue";
     const typeBadge = `<span class="pill pill--${isRev ? 'revenue' : 'expense'}">${isRev ? 'Revenue' : 'Expense'}</span>`;
-    const statusPill = `<span class="pill pill--${t.status}">${escapeHtml(t.status)}</span>`;
-    const originalText = t.currency === "ILS" ? "" : `<div class="sub-amount">${formatCurrency(t.amount, t.currency)}</div>`;
+    const statusPill = `<span class="pill pill--${t.status}">${escapeHtml(t.status.replace(/_/g, ' '))}</span>`;
+
+    let originalText = "";
+    if (t.currency && t.currency !== "ILS") {
+      const rateText = t.exchangeRate ? ` @ ${t.exchangeRate}` : "";
+      const isFallback = t.rateSource === "fallback" || (!t.rateConfirmed && t.exchangeRate);
+      const fallbackBadge = isFallback
+        ? ` <span class="pill pill--fallback" title="Saved using historical fallback rate (unconfirmed)">Fallback Rate</span>`
+        : "";
+      originalText = `<div class="sub-amount">${formatCurrency(t.amount, t.currency)}${rateText}${fallbackBadge}</div>`;
+    }
 
     return `
       <tr data-id="${escapeHtml(t.id)}">
@@ -734,21 +829,40 @@ function openTransactionModal(type = "revenue", existing = null) {
   const statusSelect = document.getElementById("tx-status");
   const notesInput = document.getElementById("tx-notes");
 
-  if (typeSelect) typeSelect.value = existing ? existing.type : type;
+  const isShopify = Boolean(existing && existing.source === "shopify");
+  const isShopifySettlement = isShopify && existing.rateSource === "settlement";
+
+  if (typeSelect) {
+    typeSelect.value = existing ? existing.type : type;
+    typeSelect.disabled = Boolean(existing);
+  }
   if (descInput) descInput.value = existing ? existing.description : "";
-  if (amountInput) amountInput.value = existing ? existing.amount : "";
-  if (currSelect) currSelect.value = existing ? existing.currency : "ILS";
+  if (amountInput) {
+    amountInput.value = existing ? existing.amount : "";
+    amountInput.disabled = isShopify;
+    amountInput.title = isShopify ? "Amount imported from Shopify cannot be manually edited." : "";
+  }
+  if (currSelect) {
+    currSelect.value = existing ? existing.currency : "ILS";
+    currSelect.disabled = Boolean(existing);
+  }
   if (rateInput) {
-    rateInput.value = existing ? existing.exchangeRate : 1.0;
-    rateInput.disabled = (currSelect?.value === "ILS");
+    rateInput.value = existing ? (existing.exchangeRate ?? "") : (currSelect?.value === "ILS" ? 1.0 : "");
+    rateInput.disabled = (currSelect?.value === "ILS") || isShopifySettlement;
+    rateInput.title = isShopifySettlement
+      ? "Exchange rate derived from Shopify settlement amount cannot be manually edited."
+      : "";
   }
   if (catInput) catInput.value = existing ? existing.category : (type === "revenue" ? "Hardware" : "Infrastructure");
-  if (dateInput) dateInput.value = existing ? existing.transactionDate : new Date().toISOString().split("T")[0];
+  if (dateInput) {
+    dateInput.value = existing ? existing.transactionDate : new Date().toISOString().split("T")[0];
+    dateInput.disabled = isShopify;
+  }
   if (statusSelect) statusSelect.value = existing ? existing.status : "paid";
   if (notesInput) notesInput.value = existing ? existing.notes || "" : "";
 
   // Trigger preview update
-  document.getElementById("tx-currency")?.dispatchEvent(new Event("change"));
+  updateTxPreview();
 
   modal.showModal();
 }
@@ -759,15 +873,27 @@ async function handleTransactionSubmit(e) {
   const editId = form.dataset.editId;
   const submitBtn = form.querySelector('button[type="submit"]');
 
+  const currency = document.getElementById("tx-currency")?.value || "ILS";
+  const rawRate = document.getElementById("tx-rate")?.value;
+  const exchangeRate = currency === "ILS" ? 1.0 : (Number(rawRate) || null);
+  const status = document.getElementById("tx-status")?.value || "paid";
+
+  if (currency !== "ILS" && (!exchangeRate || exchangeRate <= 0)) {
+    if (status === "paid" || status === "partially_refunded") {
+      alert(`An explicitly confirmed exchange rate is required for foreign currency (${currency}) transactions before they can be finalized.`);
+      return;
+    }
+  }
+
   const payload = {
     type: document.getElementById("tx-type")?.value || "revenue",
     description: document.getElementById("tx-desc")?.value?.trim() || "",
     amount: Number(document.getElementById("tx-amount")?.value) || 0,
-    currency: document.getElementById("tx-currency")?.value || "ILS",
-    exchangeRate: Number(document.getElementById("tx-rate")?.value) || 1.0,
+    currency,
+    exchangeRate,
     category: document.getElementById("tx-category")?.value || "Other",
     transactionDate: document.getElementById("tx-date")?.value || new Date().toISOString().split("T")[0],
-    status: document.getElementById("tx-status")?.value || "paid",
+    status,
     notes: document.getElementById("tx-notes")?.value?.trim() || "",
   };
 
@@ -776,9 +902,27 @@ async function handleTransactionSubmit(e) {
 
   try {
     if (editId) {
+      const updatePayload = {
+        id: editId,
+        status: payload.status,
+        description: payload.description,
+        category: payload.category,
+        notes: payload.notes,
+      };
+
+      const amtInput = document.getElementById("tx-amount");
+      if (amtInput && !amtInput.disabled) {
+        updatePayload.amount = payload.amount;
+      }
+
+      const rtInput = document.getElementById("tx-rate");
+      if (rtInput && !rtInput.disabled) {
+        updatePayload.exchangeRate = payload.exchangeRate;
+      }
+
       await callWorker("/financial/transaction-update", {
         method: "POST",
-        body: { id: editId, ...payload },
+        body: updatePayload,
       });
       showToast("Transaction updated.", "ok");
     } else {
@@ -887,4 +1031,37 @@ function showToast(msg, kind = "ok") {
   el.className = `toast toast--${kind} show`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.classList.remove("show"), 4000);
+}
+
+/**
+ * Check if the page was loaded returning from the Shopify OAuth callback,
+ * or setup a focus listener so when an admin finishes OAuth in a separate
+ * window/tab and refocuses the dashboard, integration status refreshes immediately.
+ */
+function checkShopifyOAuthCallback() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("shopify") === "connected" || params.get("shopify_connected") === "1") {
+      // Switch to Financial tab if not active
+      document.getElementById("nav-tab-financial")?.click();
+      showToast("Shopify store connected successfully!", "ok");
+
+      // Clean up the URL parameter without page reload
+      const cleanUrl = window.location.pathname + (window.location.hash || "");
+      window.history.replaceState({}, document.title, cleanUrl);
+
+      // Reload fresh overview data
+      loadAllFinancialData();
+    }
+  } catch (err) {
+    console.warn("Could not check Shopify OAuth callback params:", err);
+  }
+
+  // Refocus event listener
+  window.addEventListener("focus", () => {
+    const tabFinancial = document.getElementById("nav-tab-financial");
+    if (tabFinancial?.classList.contains("nav-tab--active")) {
+      loadOverview();
+    }
+  });
 }

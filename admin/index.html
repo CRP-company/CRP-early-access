@@ -158,6 +158,7 @@
               <button id="btn-period-all" class="btn-period" type="button">All Time</button>
             </div>
             <button id="btn-refresh-overview" class="btn" type="button">Refresh</button>
+            <button id="btn-connect-shopify" class="btn" type="button">Connect Shopify</button>
             <button id="btn-sync-shopify" class="btn" type="button">Sync Shopify</button>
           </div>
         </div>
@@ -184,6 +185,21 @@
               <p id="freshness-analytics-time">Checking status…</p>
             </div>
             <span id="freshness-analytics-status" class="pill pill--freshness pill--not_configured">Not configured</span>
+          </div>
+        </div>
+
+        <!-- Unconfirmed Foreign Amounts Warning Banner -->
+        <div id="banner-unconfirmed-amounts" class="panel" style="display: none; background: #fff8e1; border: 1px solid #ffe082; color: #b78103; margin-bottom: 1.5rem; padding: 1rem 1.25rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;">
+            <div>
+              <strong style="color: #b78103; font-size: 0.95rem;">Action Required: Unconfirmed Foreign Transactions</strong>
+              <p id="banner-unconfirmed-text" style="margin: 0.25rem 0 0 0; font-size: 0.85rem; color: #5d4037;">
+                There are foreign-currency transactions without a confirmed ILS exchange rate. They are excluded from recognized ILS revenue until confirmed.
+              </p>
+            </div>
+            <button id="btn-view-unconfirmed" class="btn" style="background: #b78103; color: #fff; border: none; font-size: 0.8rem; padding: 0.4rem 0.8rem;" type="button">
+              Review Transactions
+            </button>
           </div>
         </div>
 
@@ -321,6 +337,7 @@
               <select id="tx-status-filter" aria-label="Filter by status">
                 <option value="all">All Statuses</option>
                 <option value="paid">Paid</option>
+                <option value="partially_refunded">Partially Refunded</option>
                 <option value="pending">Pending</option>
                 <option value="scheduled">Scheduled</option>
                 <option value="refunded">Refunded</option>
@@ -406,8 +423,10 @@
             <label for="tx-status">Status</label>
             <select id="tx-status" required>
               <option value="paid">Paid / Received</option>
+              <option value="partially_refunded">Partially Refunded</option>
               <option value="pending">Pending</option>
               <option value="scheduled">Scheduled</option>
+              <option value="refunded">Refunded</option>
             </select>
           </div>
         </div>
@@ -437,6 +456,7 @@
           <div class="form-field">
             <label for="tx-rate">Exchange Rate (to ILS)</label>
             <input id="tx-rate" type="number" step="0.0001" min="0.0001" value="1.0" disabled>
+            <small id="tx-rate-hint" class="muted" style="display:block; font-size:0.75rem; margin-top:0.25rem;">For foreign currencies, enter the explicitly confirmed exchange rate.</small>
           </div>
           <div class="form-field">
             <label for="tx-date">Transaction Date</label>

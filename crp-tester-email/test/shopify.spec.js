@@ -1,7 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   parseShopifyOrderToTransactions,
   verifyShopifyWebhookHmac,
+  verifyShopifyOAuthHmac,
+  verifyShopifyTimestamp,
+  sanitizeShopDomain,
+  buildShopifyAuthUrl,
+  exchangeShopifyCodeForToken,
+  refreshShopifyToken,
+  getValidShopifyAccessToken,
   syncShopifyOrders,
 } from "../src/shopify.js";
 
@@ -129,6 +136,195 @@ describe("Shopify Integration Engine", () => {
     });
     expect(result.success).toBe(false);
     expect(result.error).toContain("not configured");
+  });
+
+  describe("Shopify OAuth Helpers", () => {
+    it("builds a correct authorization URL with grant_options[]=offline", () => {
+      const urlStr = buildShopifyAuthUrl({
+        shop: "crp-focus.myshopify.com",
+        clientId: "test_client_id_123",
+        redirectUri: "https://worker.local/financial/shopify/callback",
+        state: "state_nonce_abc",
+      });
+
+      const url = new URL(urlStr);
+      expect(url.hostname).toBe("crp-focus.myshopify.com");
+      expect(url.pathname).toBe("/admin/oauth/authorize");
+      expect(url.searchParams.get("client_id")).toBe("test_client_id_123");
+      expect(url.searchParams.get("scope")).toBe("read_orders");
+      expect(url.searchParams.get("redirect_uri")).toBe("https://worker.local/financial/shopify/callback");
+      expect(url.searchParams.get("state")).toBe("state_nonce_abc");
+      expect(url.searchParams.getAll("grant_options[]")).toContain("offline");
+    });
+
+    it("sanitizes and validates shop domains correctly", () => {
+      expect(sanitizeShopDomain("crp-focus.myshopify.com")).toBe("crp-focus.myshopify.com");
+      expect(sanitizeShopDomain("CRP-FOCUS.myshopify.com ")).toBe("crp-focus.myshopify.com");
+      expect(sanitizeShopDomain("invalid-domain.com")).toBeNull();
+      expect(sanitizeShopDomain("https://crp-focus.myshopify.com")).toBeNull();
+      expect(sanitizeShopDomain("crp-focus.myshopify.com", "other-shop.myshopify.com")).toBeNull();
+      expect(sanitizeShopDomain("crp-focus.myshopify.com", "crp-focus.myshopify.com")).toBe(
+        "crp-focus.myshopify.com",
+      );
+    });
+
+    it("validates timestamp freshness against clock skew", () => {
+      const now = Math.floor(Date.now() / 1000);
+      const freshParams = new URLSearchParams({ timestamp: String(now - 120) }); // 2 min ago
+      expect(verifyShopifyTimestamp(freshParams, 600)).toBe(true);
+
+      const staleParams = new URLSearchParams({ timestamp: String(now - 900) }); // 15 min ago
+      expect(verifyShopifyTimestamp(staleParams, 600)).toBe(false);
+
+      const invalidParams = new URLSearchParams({ timestamp: "not-a-number" });
+      expect(verifyShopifyTimestamp(invalidParams, 600)).toBe(false);
+    });
+
+    it("verifies OAuth callback HMAC correctly and detects tampering", async () => {
+      const secret = "secret_app_key_999";
+      const params = new URLSearchParams({
+        code: "oauth_auth_code_xyz",
+        shop: "crp-focus.myshopify.com",
+        state: "nonce_123",
+        timestamp: "1740000000",
+      });
+
+      // Calculate HMAC over sorted params: code=...&shop=...&state=...&timestamp=...
+      const message = "code=oauth_auth_code_xyz&shop=crp-focus.myshopify.com&state=nonce_123&timestamp=1740000000";
+      const encoder = new TextEncoder();
+      const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const sig = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(message));
+      const hex = Array.from(new Uint8Array(sig))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+      params.set("hmac", hex);
+
+      const isValid = await verifyShopifyOAuthHmac(params, secret);
+      expect(isValid).toBe(true);
+
+      // Wrong secret fails
+      expect(await verifyShopifyOAuthHmac(params, "wrong_secret")).toBe(false);
+
+      // Tampered code fails
+      params.set("code", "tampered_code");
+      expect(await verifyShopifyOAuthHmac(params, secret)).toBe(false);
+    });
+
+    it("exchanges authorization code for tokens with expiring=1", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "shpua_test_access_token",
+          scope: "read_orders,read_all_orders",
+          expires_in: 3600,
+          refresh_token: "shpr_test_refresh_token",
+          refresh_token_expires_in: 7776000,
+        }),
+      });
+
+      const res = await exchangeShopifyCodeForToken({
+        shop: "crp-focus.myshopify.com",
+        code: "auth_code_123",
+        clientId: "client_id",
+        clientSecret: "client_secret",
+        fetchImpl: mockFetch,
+      });
+
+      expect(res.accessToken).toBe("shpua_test_access_token");
+      expect(res.expiresIn).toBe(3600);
+      expect(res.refreshToken).toBe("shpr_test_refresh_token");
+      expect(res.refreshTokenExpiresIn).toBe(7776000);
+
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe("https://crp-focus.myshopify.com/admin/oauth/access_token");
+      const sentBody = JSON.parse(init.body);
+      expect(sentBody.expiring).toBe("1");
+      expect(sentBody.code).toBe("auth_code_123");
+    });
+
+    it("refreshes expiring tokens and rotates refresh token", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "shpua_new_refreshed_token",
+          scope: "read_orders,read_all_orders",
+          expires_in: 3600,
+          refresh_token: "shpr_new_rotated_refresh_token",
+          refresh_token_expires_in: 7776000,
+        }),
+      });
+
+      const res = await refreshShopifyToken({
+        shop: "crp-focus.myshopify.com",
+        refreshToken: "shpr_old_refresh_token",
+        clientId: "client_id",
+        clientSecret: "client_secret",
+        fetchImpl: mockFetch,
+      });
+
+      expect(res.accessToken).toBe("shpua_new_refreshed_token");
+      expect(res.refreshToken).toBe("shpr_new_rotated_refresh_token");
+
+      const [, init] = mockFetch.mock.calls[0];
+      const sentBody = JSON.parse(init.body);
+      expect(sentBody.grant_type).toBe("refresh_token");
+      expect(sentBody.refresh_token).toBe("shpr_old_refresh_token");
+    });
+
+    it("retrieves valid token from Firestore and refreshes when expiring soon", async () => {
+      const now = Date.now();
+      const mockStore = {
+        data: {
+          "financials/shopify_integration": {
+            accessToken: "shpua_old_token",
+            expiresAt: now + 60_000, // expiring in 1 min (< 5 min threshold)
+            refreshToken: "shpr_active_refresh",
+            shopDomain: "crp-focus.myshopify.com",
+          },
+        },
+        async getDocument(col, id) {
+          return this.data[`${col}/${id}`] || null;
+        },
+        async updateDocument(col, id, patch) {
+          this.data[`${col}/${id}`] = { ...this.data[`${col}/${id}`], ...patch };
+          return true;
+        },
+      };
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "shpua_auto_refreshed_token",
+          scope: "read_orders,read_all_orders",
+          expires_in: 3600,
+          refresh_token: "shpr_auto_rotated_refresh",
+          refresh_token_expires_in: 7776000,
+        }),
+      });
+
+      const tokenResult = await getValidShopifyAccessToken({
+        store: mockStore,
+        env: {
+          SHOPIFY_CLIENT_ID: "cid",
+          SHOPIFY_CLIENT_SECRET: "csec",
+          SHOPIFY_STORE_DOMAIN: "crp-focus.myshopify.com",
+        },
+        fetchImpl: mockFetch,
+      });
+
+      expect(tokenResult.accessToken).toBe("shpua_auto_refreshed_token");
+      expect(tokenResult.source).toBe("refreshed");
+      expect(mockStore.data["financials/shopify_integration"].accessToken).toBe(
+        "shpua_auto_refreshed_token",
+      );
+    });
   });
 });
 

@@ -82,5 +82,14 @@ assert.ok(css.includes(".period-switcher"), "Missing .period-switcher in CSS");
 assert.ok(css.includes("border-radius: 25px"), "User 25px border-radius must be preserved");
 pass("CSS styling consistent with design system and preserves user's 25px border radius");
 
+// 10. Shopify Integration Actions & OAuth Callback Handling
+assert.ok(html.includes('id="btn-connect-shopify"'), "Missing Connect Shopify button");
+assert.ok(html.includes('id="btn-sync-shopify"'), "Missing Sync Shopify button");
+assert.ok(js.includes('btn-connect-shopify'), "Missing Connect Shopify event listener in financial.js");
+assert.ok(js.includes('/financial/shopify/auth'), "Missing /financial/shopify/auth endpoint invocation");
+assert.ok(js.includes('checkShopifyOAuthCallback'), "Missing checkShopifyOAuthCallback function");
+assert.ok(js.includes('shopify') && js.includes('connected'), "Missing shopify=connected parameter handling");
+pass("Shopify OAuth connect button, endpoint handler, and callback return detection verified");
+
 console.log(`\nALL ${passed} UI & INTEGRITY CHECKS PASSED.`);
 

@@ -25,7 +25,8 @@
 		"CRP_EMAIL_FROM": "CRP Tester Program <testing@crp.company>",
 		"FIREBASE_PROJECT_ID": "crp-cuby-display",
 		"ADMIN_EMAILS": "atronamir5@gmail.com,idogaldavid@gmail.com",
-		"RATE_LIMITING": "true"
+		"RATE_LIMITING": "true",
+		"SHOPIFY_STORE_DOMAIN": "scxtax-ra.myshopify.com"
 	}
 	/**
 	 * Static Assets

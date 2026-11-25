@@ -600,10 +600,12 @@ export default {
     }
 
     // Origin check first: this endpoint relays email, so it must not be
-    // callable from arbitrary sites. Webhooks don't send browser Origin headers.
+    // callable from arbitrary sites. Webhooks and OAuth callbacks don't send browser Origin headers.
     const isShopifyWebhook = url.pathname === "/financial/shopify/webhook";
+    const isShopifyCallback = url.pathname === "/financial/shopify/callback";
+    const isPublicShopify = isShopifyWebhook || isShopifyCallback;
     const origin = request.headers.get("Origin");
-    if (!isShopifyWebhook && !isAllowedOrigin(origin, allowedOrigins(env))) {
+    if (!isPublicShopify && !isAllowedOrigin(origin, allowedOrigins(env))) {
       return json(403, { ok: false, error: "Origin not allowed." });
     }
 

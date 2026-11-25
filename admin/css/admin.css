@@ -674,7 +674,9 @@ td.actions .btn { margin-left: 0.35rem; }
 .pill--pending { background: #fff4e5; color: #8a5300; }
 .pill--scheduled { background: #e0f2fe; color: #0369a1; }
 .pill--refunded { background: #f3e8ff; color: #6b21a8; }
+.pill--partially_refunded { background: #fef3c7; color: #92400e; }
 .pill--cancelled { background: #f1f5f9; color: #475569; }
+.pill--fallback { background: #fef2f2; color: #991b1b; font-size: 0.7rem; border: 1px dashed #f87171; padding: 2px 6px; }
 
 .sub-amount {
   font-size: 0.72rem;

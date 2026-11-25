@@ -3,6 +3,9 @@
  *
  * Responsibilities:
  * - Realized revenue, expense, and net profit calculations.
+ * - Revenue recognized net of full and partial refunds.
+ * - Temporal accuracy: refunds reduce recognized revenue in the month they occur,
+ *   preserving historical order recognition in prior months.
  * - Filtering by Current Month (Asia/Jerusalem) vs All Time.
  * - Strict exclusion of pending, scheduled, and cancelled items from realized figures.
  * - Active MRR-equivalent calculation for recurring revenue and expenses.
@@ -43,6 +46,15 @@ export function isInYearMonth(dateStr, yearMonth) {
 /**
  * Calculate financial overview metrics.
  *
+ * Accounting rules:
+ * - Net Revenue = Gross Recognized Paid Revenue - Realized Refunds.
+ * - Orders marked 'paid' or 'partially_refunded' represent gross purchase revenue.
+ * - Distinct refund adjustment transactions (isRefund === true) reduce recognized revenue.
+ * - Orders marked 'refunded' that have distinct refund transactions represent gross purchases whose
+ *   adjustments are realized via their refund records (preserving month-over-month GAAP timing).
+ * - Orders marked 'refunded' without distinct refund records contribute net 0.
+ * - Pending, scheduled, and cancelled orders are excluded from recognized revenue.
+ *
  * @param {Array<object>} transactions List of all financial transactions
  * @param {Array<object>} recurringDefinitions List of recurring definitions
  * @param {string} [period] "current_month" | "all_time" (default "current_month")
@@ -57,15 +69,36 @@ export function calculateFinancialSummary(
 ) {
   const { yearMonth } = getJerusalemYearMonth(referenceDate);
 
-  let totalRevenueAllTime = 0;
+  let grossRevenueAllTime = 0;
+  let refundsAllTime = 0;
   let totalExpensesAllTime = 0;
-  let monthlyRevenue = 0;
+
+  let monthlyGrossRevenue = 0;
+  let monthlyRefunds = 0;
   let monthlyExpenses = 0;
+
+  // Track unconfirmed foreign currency amounts
+  let unconfirmedCount = 0;
+  const unconfirmedTransactions = [];
+  const unconfirmedForeignTotals = {};
 
   // Breakdown counters
   const statusBreakdown = {
-    revenue: { paid: 0, pending: 0, scheduled: 0, cancelled: 0, refunded: 0 },
-    expense: { paid: 0, pending: 0, scheduled: 0, cancelled: 0, refunded: 0 },
+    revenue: {
+      paid: 0,
+      pending: 0,
+      scheduled: 0,
+      cancelled: 0,
+      refunded: 0,
+      partially_refunded: 0,
+    },
+    expense: {
+      paid: 0,
+      pending: 0,
+      scheduled: 0,
+      cancelled: 0,
+      refunded: 0,
+    },
   };
 
   // Category breakdowns
@@ -74,29 +107,91 @@ export function calculateFinancialSummary(
     expense: {},
   };
 
+  // Identify all orders that have associated separate refund records
+  const refundedOrderKeys = new Set(
+    transactions
+      .filter((x) => x.isRefund || (x.parentTransactionId && x.status === "refunded"))
+      .map((x) => x.orderId || x.parentTransactionId || x.externalId)
+      .filter(Boolean),
+  );
+
   for (const t of transactions) {
     const type = t.type === "expense" ? "expense" : "revenue";
     const status = t.status || "pending";
+    const currency = String(t.currency || "ILS").toUpperCase();
+    const isBaseILS = currency === "ILS";
+    const isUnconfirmed = !isBaseILS && (t.amountILS == null || t.rateConfirmed === false || t.rateSource === "unconfirmed" || t.rateSource === "fallback");
+
+    if (isUnconfirmed) {
+      unconfirmedCount += 1;
+      unconfirmedTransactions.push({
+        id: t.id,
+        description: t.description || t.notes || t.id,
+        currency,
+        amount: Number(t.amount) || 0,
+        transactionDate: t.transactionDate,
+        source: t.source,
+        status: t.status,
+      });
+      unconfirmedForeignTotals[currency] = Math.round(((unconfirmedForeignTotals[currency] || 0) + (Number(t.amount) || 0) + Number.EPSILON) * 100) / 100;
+    }
+
+    // Transactions with null/missing ILS amounts cannot contribute to recognized ILS totals
+    if (t.amountILS == null) {
+      continue;
+    }
+
     const amountILS = Number(t.amountILS) || 0;
     const isCurrentMonth = isInYearMonth(t.transactionDate, yearMonth);
+    const isRefundAdjustment = Boolean(
+      t.isRefund || (type === "revenue" && status === "refunded" && t.parentTransactionId),
+    );
 
     // Track status breakdown (All time)
     if (statusBreakdown[type][status] !== undefined) {
       statusBreakdown[type][status] += amountILS;
     }
 
-    // Only "paid" transactions count toward recognized / realized revenue & expenses
-    if (status === "paid") {
-      if (type === "revenue") {
-        totalRevenueAllTime += amountILS;
-        if (isCurrentMonth) monthlyRevenue += amountILS;
-        categoryTotals.revenue[t.category || "Other"] =
-          (categoryTotals.revenue[t.category || "Other"] || 0) + amountILS;
-      } else {
+    if (type === "revenue") {
+      if (isRefundAdjustment) {
+        // Distinct refund adjustment record: deduct from recognized revenue
+        refundsAllTime += amountILS;
+        if (isCurrentMonth) monthlyRefunds += amountILS;
+
+        const cat = t.category || "Other";
+        categoryTotals.revenue[cat] = (categoryTotals.revenue[cat] || 0) - amountILS;
+      } else if (status === "paid" || status === "partially_refunded") {
+        // Recognized gross purchase
+        grossRevenueAllTime += amountILS;
+        if (isCurrentMonth) monthlyGrossRevenue += amountILS;
+
+        const cat = t.category || "Other";
+        categoryTotals.revenue[cat] = (categoryTotals.revenue[cat] || 0) + amountILS;
+      } else if (status === "refunded") {
+        // If order itself is status 'refunded', check if separate refund transactions exist for it
+        const hasSeparateRefundRecords =
+          refundedOrderKeys.has(t.id) ||
+          refundedOrderKeys.has(t.orderId) ||
+          refundedOrderKeys.has(t.externalId);
+
+        if (hasSeparateRefundRecords) {
+          // Gross order is recognized; the separate refund records deduct it in the month refunded
+          grossRevenueAllTime += amountILS;
+          if (isCurrentMonth) monthlyGrossRevenue += amountILS;
+
+          const cat = t.category || "Other";
+          categoryTotals.revenue[cat] = (categoryTotals.revenue[cat] || 0) + amountILS;
+        }
+        // If no separate refund records exist, order is fully refunded with net 0 contribution
+      }
+    } else {
+      // Expense
+      if (status === "paid") {
         totalExpensesAllTime += amountILS;
         if (isCurrentMonth) monthlyExpenses += amountILS;
-        categoryTotals.expense[t.category || "Other"] =
-          (categoryTotals.expense[t.category || "Other"] || 0) + amountILS;
+
+        const cat = t.category || "Other";
+        categoryTotals.expense[cat] = (categoryTotals.expense[cat] || 0) + amountILS;
       }
     }
   }
@@ -119,11 +214,12 @@ export function calculateFinancialSummary(
   // Round all metrics to 2 decimal places
   const round = (val) => Math.round((val + Number.EPSILON) * 100) / 100;
 
-  const totalRevenue = round(totalRevenueAllTime);
+  // NET REVENUE = Gross Recognized - Realized Refunds
+  const totalRevenue = round(Math.max(0, grossRevenueAllTime - refundsAllTime));
   const totalExpenses = round(totalExpensesAllTime);
   const netProfitAllTime = round(totalRevenue - totalExpenses);
 
-  const mRevenue = round(monthlyRevenue);
+  const mRevenue = round(Math.max(0, monthlyGrossRevenue - monthlyRefunds));
   const mExpenses = round(monthlyExpenses);
   const mNetProfit = round(mRevenue - mExpenses);
 
@@ -131,14 +227,23 @@ export function calculateFinancialSummary(
     period,
     yearMonth,
     currency: "ILS",
+    unconfirmedCount,
+    hasUnconfirmedAmounts: unconfirmedCount > 0,
+    unconfirmedTransactions,
+    unconfirmedForeignTotals,
     // All time totals
     totalRevenue,
     totalExpenses,
     netProfit: netProfitAllTime,
+    // Gross and refund breakdown
+    grossRevenue: round(grossRevenueAllTime),
+    totalRefunds: round(refundsAllTime),
     // Current month totals
     monthlyRevenue: mRevenue,
     monthlyExpenses: mExpenses,
     monthlyNetProfit: mNetProfit,
+    monthlyGrossRevenue: round(monthlyGrossRevenue),
+    monthlyRefunds: round(monthlyRefunds),
     // Active recurring
     activeMRR: round(activeMRR),
     activeRecurringExpensesMonthly: round(activeRecurringExpenses),
@@ -148,23 +253,33 @@ export function calculateFinancialSummary(
         paid: round(statusBreakdown.revenue.paid),
         pending: round(statusBreakdown.revenue.pending),
         scheduled: round(statusBreakdown.revenue.scheduled),
-        refunded: round(statusBreakdown.revenue.refunded),
         cancelled: round(statusBreakdown.revenue.cancelled),
+        refunded: round(refundsAllTime > 0 ? refundsAllTime : statusBreakdown.revenue.refunded),
+        partially_refunded: round(statusBreakdown.revenue.partially_refunded),
       },
       expense: {
         paid: round(statusBreakdown.expense.paid),
         pending: round(statusBreakdown.expense.pending),
         scheduled: round(statusBreakdown.expense.scheduled),
-        refunded: round(statusBreakdown.expense.refunded),
         cancelled: round(statusBreakdown.expense.cancelled),
+        refunded: round(statusBreakdown.expense.refunded),
       },
     },
-    categoryTotals,
+    categoryTotals: {
+      revenue: Object.fromEntries(
+        Object.entries(categoryTotals.revenue).map(([k, v]) => [k, round(v)]),
+      ),
+      expense: Object.fromEntries(
+        Object.entries(categoryTotals.expense).map(([k, v]) => [k, round(v)]),
+      ),
+    },
   };
 }
 
 /**
  * Generate monthly time-series buckets for charts (last N months).
+ * Reflects refunds by deducting them in the month the refund occurred.
+ *
  * @param {Array<object>} transactions
  * @param {number} [monthsCount] Number of months to include (default 12)
  * @param {Date} [referenceDate]
@@ -178,7 +293,7 @@ export function generateMonthlyChartData(
   const buckets = [];
   const ref = new Date(referenceDate);
 
-  // Build the list of months in chronological order
+  // Build chronological list of month buckets
   for (let i = monthsCount - 1; i >= 0; i -= 1) {
     const d = new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - i, 1));
     const year = d.getUTCFullYear();
@@ -197,27 +312,53 @@ export function generateMonthlyChartData(
 
   const bucketMap = new Map(buckets.map((b) => [b.month, b]));
 
+  const refundedOrderKeys = new Set(
+    transactions
+      .filter((x) => x.isRefund || (x.parentTransactionId && x.status === "refunded"))
+      .map((x) => x.orderId || x.parentTransactionId || x.externalId)
+      .filter(Boolean),
+  );
+
   for (const t of transactions) {
-    if (t.status !== "paid") continue;
-    const dateStr = String(t.transactionDate || "");
+    const curr = String(t.currency || "ILS").toUpperCase();
+    const isUnconfirmed = curr !== "ILS" && (t.amountILS == null || !t.rateConfirmed || t.rateSource === "unconfirmed");
+    if (isUnconfirmed) continue;
+
+    const dateStr = String(t.transactionDate || t.date || t.createdAt || "");
     const monthKey = dateStr.slice(0, 7);
     const bucket = bucketMap.get(monthKey);
     if (!bucket) continue;
 
     const amount = Number(t.amountILS) || 0;
+    const isRefundAdjustment = Boolean(
+      t.isRefund || (t.type === "revenue" && t.status === "refunded" && t.parentTransactionId),
+    );
+
     if (t.type === "revenue") {
-      bucket.revenue += amount;
-    } else {
+      if (isRefundAdjustment) {
+        // Refund reduces revenue in the month the refund occurred
+        bucket.revenue -= amount;
+      } else if (
+        t.status === "paid" ||
+        t.status === "partially_refunded" ||
+        (t.status === "refunded" && (
+          refundedOrderKeys.has(t.id) ||
+          refundedOrderKeys.has(t.orderId) ||
+          refundedOrderKeys.has(t.externalId)
+        ))
+      ) {
+        bucket.revenue += amount;
+      }
+    } else if (t.type === "expense" && t.status === "paid") {
       bucket.expenses += amount;
     }
   }
 
   for (const b of buckets) {
-    b.revenue = Math.round((b.revenue + Number.EPSILON) * 100) / 100;
+    b.revenue = Math.round((Math.max(0, b.revenue) + Number.EPSILON) * 100) / 100;
     b.expenses = Math.round((b.expenses + Number.EPSILON) * 100) / 100;
     b.netProfit = Math.round((b.revenue - b.expenses + Number.EPSILON) * 100) / 100;
   }
 
   return buckets;
 }
-

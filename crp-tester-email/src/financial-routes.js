@@ -18,7 +18,17 @@ import {
   generateMonthlyChartData,
 } from "./financial-calc.js";
 import { generateRecurringOccurrences } from "./recurring-engine.js";
-import { syncShopifyOrders, verifyShopifyWebhookHmac, parseShopifyOrderToTransactions } from "./shopify.js";
+import {
+  syncShopifyOrders,
+  verifyShopifyWebhookHmac,
+  verifyShopifyOAuthHmac,
+  verifyShopifyTimestamp,
+  sanitizeShopDomain,
+  buildShopifyAuthUrl,
+  exchangeShopifyCodeForToken,
+  getValidShopifyAccessToken,
+  parseShopifyOrderToTransactions,
+} from "./shopify.js";
 import {
   buildCohortRecord,
   calculateAggregatedRetention,
@@ -43,6 +53,11 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
   // Webhook is public with cryptographic HMAC verification
   if (path === "/financial/shopify/webhook" && method === "POST") {
     return handleShopifyWebhook(request, env, jsonResponse, origin);
+  }
+
+  // OAuth callback is public with cryptographic HMAC, timestamp, and one-time state verification
+  if (path === "/financial/shopify/callback" && method === "GET") {
+    return handleShopifyCallback(request, url, env, jsonResponse, origin);
   }
 
   // All other financial routes require financial admin authorization + step-up auth
@@ -84,7 +99,10 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       const rawCohorts = await store.listCollection("analytics/cohorts");
 
       // Fetch integration statuses
-      const shopifyIntegration = (await store.getDocument("financials/integrations", "shopify")) || null;
+      const shopifyIntegration =
+        (await store.getDocument("financials", "shopify_integration").catch(() => null)) ||
+        (await store.getDocument("financials/integrations", "shopify").catch(() => null)) ||
+        null;
       const playIntegration = (await store.getDocument("analytics/syncStatus", "google_play")) || null;
       const analyticsIntegration =
         (await store.getDocument("analytics/syncStatus", "firebase_analytics")) || null;
@@ -198,6 +216,69 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       if (body.notes !== undefined) patch.notes = String(body.notes).slice(0, 1000);
       if (body.category) patch.category = String(body.category).slice(0, 80);
 
+      const currency = String(existing.currency || "ILS").toUpperCase();
+
+      // Handle exchange rate modification
+      if (body.exchangeRate !== undefined) {
+        const newRate = Number(body.exchangeRate);
+        if (!Number.isFinite(newRate) || newRate <= 0) {
+          return jsonResponse(400, { ok: false, error: "Exchange rate must be a positive finite number." }, origin);
+        }
+
+        if (existing.source === "shopify" && existing.rateSource === "settlement") {
+          return jsonResponse(400, { ok: false, error: "Cannot manually override exchange rate on Shopify settlement-verified transactions." }, origin);
+        }
+
+        if (currency === "ILS" && newRate !== 1.0) {
+          return jsonResponse(400, { ok: false, error: "Exchange rate for ILS base currency must be 1.0." }, origin);
+        }
+
+        const effectiveAmount = body.amount !== undefined ? Number(body.amount) : Number(existing.amount);
+        const newAmountILS = Math.round((effectiveAmount * newRate + Number.EPSILON) * 100) / 100;
+
+        patch.exchangeRate = newRate;
+        patch.amountILS = newAmountILS;
+        patch.rateConfirmed = true;
+        patch.rateSource = currency === "ILS" ? "base_currency" : "explicit";
+
+        const rateHistory = Array.isArray(existing.rateHistory) ? [...existing.rateHistory] : [];
+        rateHistory.push({
+          rate: newRate,
+          previousRate: existing.exchangeRate ?? null,
+          previousAmountILS: existing.amountILS ?? null,
+          updatedAt: patch.updatedAt,
+          updatedBy: caller.email,
+        });
+        patch.rateHistory = rateHistory;
+
+        // If transaction has refunds / netAmount, update netAmountILS
+        if (existing.totalRefundedILS !== undefined || existing.totalRefunded !== undefined) {
+          const refILS = Number(existing.totalRefundedILS) || 0;
+          patch.netAmountILS = (existing.status === "refunded" || (existing.totalRefunded >= existing.amount))
+            ? 0
+            : Math.max(0, Math.round((newAmountILS - refILS + Number.EPSILON) * 100) / 100);
+        }
+      }
+
+      // Handle manual amount modification
+      if (body.amount !== undefined) {
+        const newAmount = Number(body.amount);
+        if (!Number.isFinite(newAmount) || newAmount <= 0) {
+          return jsonResponse(400, { ok: false, error: "Amount must be a positive finite number." }, origin);
+        }
+        if (existing.source === "shopify") {
+          return jsonResponse(400, { ok: false, error: "Cannot manually change amount on Shopify imported transactions." }, origin);
+        }
+
+        patch.amount = newAmount;
+        if (body.exchangeRate === undefined) {
+          const rate = Number(existing.exchangeRate) || 1.0;
+          if (existing.rateConfirmed && Number.isFinite(rate) && rate > 0) {
+            patch.amountILS = Math.round((newAmount * rate + Number.EPSILON) * 100) / 100;
+          }
+        }
+      }
+
       await store.updateDocument("financials/transactions", id, patch);
       return jsonResponse(200, { ok: true, id, patch }, origin);
     }
@@ -302,25 +383,140 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       return jsonResponse(200, { ok: true, generatedCount: generated.length, generated }, origin);
     }
 
-    // ------------------------------------------------------------------ SHOPIFY SYNC
-    if (path === "/financial/shopify/sync" && method === "POST") {
-      const shopDomain = env.SHOPIFY_SHOP_DOMAIN;
-      const accessToken = env.SHOPIFY_ACCESS_TOKEN;
+    // ------------------------------------------------------------------ SHOPIFY OAUTH START
+    if (path === "/financial/shopify/auth" && (method === "GET" || method === "POST")) {
+      const clientId = env.SHOPIFY_CLIENT_ID;
+      if (!clientId) {
+        return jsonResponse(
+          500,
+          { ok: false, error: "SHOPIFY_CLIENT_ID is not configured in Worker secrets." },
+          origin,
+        );
+      }
 
-      if (!shopDomain || !accessToken) {
+      const requestedShop =
+        url.searchParams.get("shop") || env.SHOPIFY_STORE_DOMAIN || env.SHOPIFY_SHOP_DOMAIN;
+      const sanitizedShop = sanitizeShopDomain(
+        requestedShop,
+        env.SHOPIFY_STORE_DOMAIN || env.SHOPIFY_SHOP_DOMAIN,
+      );
+
+      if (!sanitizedShop) {
         return jsonResponse(
           400,
           {
             ok: false,
-            error: "Shopify domain and access token must be configured in Worker secrets.",
+            error:
+              "Invalid shop domain. Must be in the format '{shop}.myshopify.com' and match the authorized store.",
+          },
+          origin,
+        );
+      }
+
+      // Generate cryptographically secure random state nonce
+      const state = crypto.randomUUID();
+      const expiresAt = Date.now() + 600_000; // 10 minutes TTL
+
+      // Store state in Firestore: financials/oauth_state_${state}
+      try {
+        await store.createDocument("financials", `oauth_state_${state}`, {
+          state,
+          adminUid: caller.uid,
+          adminEmail: caller.email,
+          shopDomain: sanitizedShop,
+          createdAt: Date.now(),
+          expiresAt,
+        });
+      } catch (err) {
+        return jsonResponse(
+          500,
+          { ok: false, error: `Could not save OAuth state: ${err.message}` },
+          origin,
+        );
+      }
+
+      const callbackUrl =
+        env.SHOPIFY_CALLBACK_URL ||
+        "https://crp-tester-email.atronamir5.workers.dev/financial/shopify/callback";
+
+      const authorizeUrl = buildShopifyAuthUrl({
+        shop: sanitizedShop,
+        clientId,
+        redirectUri: callbackUrl,
+        state,
+        scopes: env.SHOPIFY_SCOPES || undefined,
+      });
+
+      return jsonResponse(
+        200,
+        {
+          ok: true,
+          authorizeUrl,
+          state,
+          shop: sanitizedShop,
+          expiresAt,
+        },
+        origin,
+      );
+    }
+
+    // ------------------------------------------------------------------ SHOPIFY STATUS
+    if (path === "/financial/shopify/status" && method === "GET") {
+      let doc = null;
+      try {
+        doc = await store.getDocument("financials", "shopify_integration");
+      } catch {
+        // ignore
+      }
+      if (!doc) {
+        try {
+          doc = await store.getDocument("financials/integrations", "shopify");
+        } catch {
+          // ignore
+        }
+      }
+
+      const isConnected = Boolean(doc?.connected || env.SHOPIFY_ACCESS_TOKEN);
+      const shopDomain =
+        doc?.shopDomain || env.SHOPIFY_STORE_DOMAIN || env.SHOPIFY_SHOP_DOMAIN || null;
+
+      return jsonResponse(
+        200,
+        {
+          ok: true,
+          connected: isConnected,
+          shopDomain,
+          syncStatus: doc?.syncStatus || (isConnected ? "connected" : "not_configured"),
+          lastSuccessfulSync: doc?.lastSuccessfulSync || null,
+          lastAttemptedSync: doc?.lastAttemptedSync || null,
+          lastError: doc?.lastError || null,
+          scope: doc?.scope || null,
+          tokenType: doc?.refreshToken ? "expiring_offline" : (doc?.accessToken ? "offline" : null),
+          expiresAt: doc?.expiresAt || null,
+        },
+        origin,
+      );
+    }
+
+    // ------------------------------------------------------------------ SHOPIFY SYNC
+    if (path === "/financial/shopify/sync" && method === "POST") {
+      let tokenInfo;
+      try {
+        tokenInfo = await getValidShopifyAccessToken({ store, env });
+      } catch (tokenErr) {
+        return jsonResponse(
+          400,
+          {
+            ok: false,
+            error: tokenErr.message,
           },
           origin,
         );
       }
 
       const syncResult = await syncShopifyOrders({
-        shopDomain,
-        accessToken,
+        shopDomain: tokenInfo.shopDomain,
+        accessToken: tokenInfo.accessToken,
         store,
       });
 
@@ -427,14 +623,93 @@ async function handleShopifyWebhook(request, env, jsonResponse, origin) {
   const transactions = parseShopifyOrderToTransactions(orderData);
 
   for (const tx of transactions) {
+    let existing = null;
     try {
-      await store.createDocument("financials/transactions", tx.id, tx);
+      existing = await store.getDocument("financials/transactions", tx.id);
     } catch {
+      // proceed
+    }
+
+    if (!existing) {
+      try {
+        await store.createDocument("financials/transactions", tx.id, tx);
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    // Existing transaction found. Verify timestamp ordering.
+    const incomingTime = new Date(tx.shopifyUpdatedAt || tx.updatedAt || 0).getTime();
+    const existingTime = new Date(existing.shopifyUpdatedAt || existing.updatedAt || 0).getTime();
+
+    // If incoming event is older than our existing record, do not overwrite with stale data
+    if (incomingTime > 0 && existingTime > 0 && incomingTime < existingTime) {
+      continue; // Stale webhook event ignored
+    }
+
+    if (tx.isRefund) {
+      // For refund records, preserve existing confirmed rates/amounts
       try {
         await store.updateDocument("financials/transactions", tx.id, {
-          status: tx.status,
           amount: tx.amount,
-          amountILS: tx.amountILS,
+          amountILS: existing.rateConfirmed && existing.amountILS != null ? existing.amountILS : tx.amountILS,
+          exchangeRate: existing.rateConfirmed && existing.exchangeRate != null ? existing.exchangeRate : tx.exchangeRate,
+          rateSource: existing.rateConfirmed ? existing.rateSource : tx.rateSource,
+          rateConfirmed: existing.rateConfirmed || tx.rateConfirmed,
+          shopifyUpdatedAt: tx.shopifyUpdatedAt || existing.shopifyUpdatedAt,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // ignore
+      }
+    } else {
+      // Parent Order Transaction:
+      // Reconcile totalRefunded so an incomplete refund payload or partial event cannot decrease known refunds
+      const reconciledTotalRefunded = Math.max(Number(existing.totalRefunded) || 0, Number(tx.totalRefunded) || 0);
+      const reconciledTotalRefundedILS = Math.max(Number(existing.totalRefundedILS) || 0, Number(tx.totalRefundedILS) || 0);
+
+      const gross = Number(tx.amount) || Number(existing.amount) || 0;
+      const grossILS = tx.amountILS != null ? tx.amountILS : existing.amountILS;
+
+      let reconciledStatus = tx.status;
+      if (existing.status === "refunded" && (gross > 0 && reconciledTotalRefunded >= gross)) {
+        reconciledStatus = "refunded";
+      } else if (reconciledTotalRefunded >= gross && gross > 0) {
+        reconciledStatus = "refunded";
+      } else if (reconciledTotalRefunded > 0) {
+        if (tx.status === "paid" || existing.status === "partially_refunded" || existing.status === "refunded") {
+          reconciledStatus = "partially_refunded";
+        }
+      }
+
+      const reconciledNetAmount = (reconciledStatus === "refunded" || (gross > 0 && reconciledTotalRefunded >= gross))
+        ? 0
+        : Math.max(0, Math.round((gross - reconciledTotalRefunded + Number.EPSILON) * 100) / 100);
+
+      const reconciledNetAmountILS = (reconciledStatus === "refunded" || (gross > 0 && reconciledTotalRefunded >= gross))
+        ? 0
+        : (grossILS != null
+          ? Math.max(0, Math.round((grossILS - reconciledTotalRefundedILS + Number.EPSILON) * 100) / 100)
+          : null);
+
+      // Preserve manually confirmed exchange rate if manual override was done and incoming has no verified settlement
+      const preserveManualRate = existing.rateSource === "explicit" && existing.rateConfirmed && tx.rateSource !== "settlement";
+
+      try {
+        await store.updateDocument("financials/transactions", tx.id, {
+          status: reconciledStatus,
+          amount: gross,
+          amountILS: preserveManualRate ? existing.amountILS : (tx.amountILS ?? existing.amountILS),
+          exchangeRate: preserveManualRate ? existing.exchangeRate : (tx.exchangeRate ?? existing.exchangeRate),
+          rateSource: preserveManualRate ? existing.rateSource : tx.rateSource,
+          rateConfirmed: preserveManualRate ? existing.rateConfirmed : tx.rateConfirmed,
+          totalRefunded: reconciledTotalRefunded,
+          totalRefundedILS: reconciledTotalRefundedILS,
+          netAmount: reconciledNetAmount,
+          netAmountILS: reconciledNetAmountILS,
+          shopifyUpdatedAt: tx.shopifyUpdatedAt || existing.shopifyUpdatedAt,
+          notes: tx.notes || existing.notes,
           updatedAt: new Date().toISOString(),
         });
       } catch {
@@ -446,3 +721,202 @@ async function handleShopifyWebhook(request, env, jsonResponse, origin) {
   return jsonResponse(200, { ok: true, processedCount: transactions.length }, origin);
 }
 
+/**
+ * Handle Shopify OAuth callback.
+ * Public endpoint verified by HMAC signature, timestamp freshness, and one-time state nonce.
+ */
+async function handleShopifyCallback(request, url, env, jsonResponse, origin) {
+  const projectId = env.FIREBASE_PROJECT_ID;
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON || !projectId) {
+    return jsonResponse(500, { ok: false, error: "Database not configured." }, origin);
+  }
+
+  const clientId = env.SHOPIFY_CLIENT_ID;
+  const clientSecret = env.SHOPIFY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return jsonResponse(
+      500,
+      { ok: false, error: "SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be configured." },
+      origin,
+    );
+  }
+
+  const searchParams = url.searchParams;
+  const code = searchParams.get("code");
+  const shop = searchParams.get("shop");
+  const state = searchParams.get("state");
+  const hmac = searchParams.get("hmac");
+
+  if (!code || !shop || !state || !hmac) {
+    return jsonResponse(
+      400,
+      { ok: false, error: "Missing required Shopify OAuth callback parameters." },
+      origin,
+    );
+  }
+
+  // 1. Timestamp freshness check (10 min replay defense)
+  if (!verifyShopifyTimestamp(searchParams, 600)) {
+    return jsonResponse(
+      400,
+      { ok: false, error: "Shopify OAuth callback timestamp is expired or skewed." },
+      origin,
+    );
+  }
+
+  // 2. Cryptographic HMAC verification
+  const isHmacValid = await verifyShopifyOAuthHmac(searchParams, clientSecret);
+  if (!isHmacValid) {
+    return jsonResponse(
+      401,
+      { ok: false, error: "Invalid Shopify OAuth callback HMAC signature." },
+      origin,
+    );
+  }
+
+  // 3. Shop domain validation
+  const sanitizedShop = sanitizeShopDomain(
+    shop,
+    env.SHOPIFY_STORE_DOMAIN || env.SHOPIFY_SHOP_DOMAIN,
+  );
+  if (!sanitizedShop) {
+    return jsonResponse(
+      400,
+      { ok: false, error: "Invalid or unauthorized Shopify store domain." },
+      origin,
+    );
+  }
+
+  // 4. State validation & one-time consumption from Firestore
+  const store = createFirestore(env.FIREBASE_SERVICE_ACCOUNT_JSON, projectId);
+  let stateDoc = null;
+  try {
+    stateDoc = await store.getDocument("financials", `oauth_state_${state}`);
+  } catch (err) {
+    return jsonResponse(
+      500,
+      { ok: false, error: `Failed to verify OAuth state: ${err.message}` },
+      origin,
+    );
+  }
+
+  if (!stateDoc) {
+    return jsonResponse(
+      403,
+      { ok: false, error: "Invalid or already consumed OAuth state nonce." },
+      origin,
+    );
+  }
+
+  // Check state expiration (10 min TTL)
+  if (stateDoc.expiresAt && Date.now() > stateDoc.expiresAt) {
+    try {
+      await store.deleteDocument("financials", `oauth_state_${state}`);
+    } catch {
+      // ignore
+    }
+    return jsonResponse(
+      403,
+      {
+        ok: false,
+        error: "OAuth state has expired. Please initiate authorization again from the dashboard.",
+      },
+      origin,
+    );
+  }
+
+  // Check state shopDomain match
+  if (stateDoc.shopDomain && stateDoc.shopDomain !== sanitizedShop) {
+    return jsonResponse(
+      403,
+      { ok: false, error: "OAuth state does not match the target shop domain." },
+      origin,
+    );
+  }
+
+  // Immediately delete state document (prevent replay attacks)
+  try {
+    await store.deleteDocument("financials", `oauth_state_${state}`);
+  } catch (err) {
+    console.warn("Could not delete consumed OAuth state:", err);
+  }
+
+  // 5. Code exchange for offline access token (with expiring=1 support)
+  let tokenResult;
+  try {
+    tokenResult = await exchangeShopifyCodeForToken({
+      shop: sanitizedShop,
+      code,
+      clientId,
+      clientSecret,
+    });
+  } catch (err) {
+    return jsonResponse(
+      502,
+      { ok: false, error: `Token exchange failed: ${err.message}` },
+      origin,
+    );
+  }
+
+  // 6. Securely persist tokens to Firestore (financials/shopify_integration)
+  const now = new Date().toISOString();
+  const integrationData = {
+    connected: true,
+    shopDomain: sanitizedShop,
+    accessToken: tokenResult.accessToken,
+    scope: tokenResult.scope,
+    expiresAt: tokenResult.expiresIn ? Date.now() + (tokenResult.expiresIn - 300) * 1000 : null,
+    refreshToken: tokenResult.refreshToken || null,
+    refreshTokenExpiresAt: tokenResult.refreshTokenExpiresIn
+      ? Date.now() + (tokenResult.refreshTokenExpiresIn - 86400) * 1000
+      : null,
+    installedBy: stateDoc.adminEmail || "admin",
+    installedAt: now,
+    lastSuccessfulSync: null,
+    lastAttemptedSync: null,
+    syncStatus: "connected",
+    lastError: null,
+    updatedAt: now,
+  };
+
+  try {
+    await store.updateDocument("financials", "shopify_integration", integrationData);
+  } catch {
+    try {
+      await store.createDocument("financials", "shopify_integration", integrationData);
+    } catch (saveErr) {
+      return jsonResponse(
+        500,
+        { ok: false, error: `Failed to persist Shopify credentials: ${saveErr.message}` },
+        origin,
+      );
+    }
+  }
+
+  // 7. Return friendly HTML or JSON
+  const format = searchParams.get("format");
+  const acceptHeader = request.headers.get("Accept") || "";
+  if (format === "json" || acceptHeader.includes("application/json")) {
+    return jsonResponse(
+      200,
+      {
+        ok: true,
+        message: "Shopify store successfully connected.",
+        shop: sanitizedShop,
+        scope: tokenResult.scope,
+      },
+      origin,
+    );
+  }
+
+  // 8. For normal browser requests, return an HTTP 302 redirect to the exact CRP Admin frontend
+  // Hardcoded target prevents open redirect vulnerabilities from user-supplied parameters
+  const redirectTarget = "https://crp-company.github.io/CRP-early-access/admin/?shopify=connected";
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: redirectTarget,
+      "Cache-Control": "no-store",
+    },
+  });
+}
