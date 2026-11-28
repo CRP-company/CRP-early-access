@@ -97,5 +97,101 @@ assert.ok(js.includes('btn-sync-play'), "Missing Sync Google Play event listener
 assert.ok(js.includes('/financial/play/sync'), "Missing /financial/play/sync endpoint invocation in financial.js");
 pass("Google Play sync button, event listener, and endpoint invocation verified");
 
-console.log(`\nALL ${passed} UI & INTEGRITY CHECKS PASSED.`);
+// 12. Transaction Modal Live Preview Scope & Invocation
+(async function testTransactionModalLivePreview() {
+  // Static scope check
+  assert.ok(
+    /export\s+function\s+updateTxPreview\s*\(/.test(js),
+    "updateTxPreview must be exported at module scope, not nested inside setupEventListeners"
+  );
+  assert.ok(
+    js.includes("updateTxPreview();"),
+    "openTransactionModal must invoke updateTxPreview() on open"
+  );
+
+  // Runtime execution check in simulated DOM
+  const listeners = {};
+  function makeEl(extra = {}) {
+    return {
+      id: extra.id || "",
+      value: extra.value || "",
+      textContent: "",
+      dataset: {},
+      style: {},
+      addEventListener(evt, fn) { listeners[`${this.id}:${evt}`] = fn; },
+      classList: { add() {}, remove() {} },
+      reset() {},
+      showModal() {},
+      close() {},
+      ...extra,
+    };
+  }
+
+  const elements = {};
+  [
+    "modal-transaction", "modal-tx-title", "tx-form", "tx-type", "tx-desc",
+    "tx-amount", "tx-currency", "tx-rate", "tx-ils-preview", "tx-category",
+    "tx-date", "tx-status", "tx-notes", "btn-add-revenue", "btn-add-expense"
+  ].forEach((id) => {
+    elements[id] = makeEl({ id });
+  });
+
+  globalThis.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeEl({ id });
+      return elements[id];
+    },
+    querySelector() { return makeEl(); },
+    querySelectorAll() { return []; },
+  };
+  globalThis.window = {
+    CRP_WORKER_URL: "",
+    location: { search: "" },
+    addEventListener() {},
+  };
+  globalThis.Event = class Event {};
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, summary: {}, transactions: [], recurring: [] }),
+  });
+
+  const mod = await import(path.resolve(__dirname, "../admin/js/financial.js"));
+  mod.initFinancial({ currentUser: { getIdToken: async () => "mock-token" } }, "https://example.com");
+
+  // Verify openTransactionModal runs via button click without ReferenceError
+  assert.doesNotThrow(() => {
+    listeners["btn-add-revenue:click"]();
+  }, "Clicking Add Revenue button must not throw ReferenceError: updateTxPreview is not defined");
+
+  assert.doesNotThrow(() => {
+    listeners["btn-add-expense:click"]();
+  }, "Clicking Add Expense button must not throw ReferenceError: updateTxPreview is not defined");
+
+  // Verify live preview reacts to ILS and foreign currency input
+  elements["tx-amount"].value = "100";
+  listeners["tx-amount:input"]();
+  assert.equal(elements["tx-ils-preview"].textContent, "Converts to ₪100.00");
+
+  elements["tx-currency"].value = "USD";
+  listeners["tx-currency:change"]({ target: { value: "USD" } });
+  assert.ok(
+    elements["tx-ils-preview"].textContent.includes("Requires confirmed exchange rate for USD"),
+    "Foreign currency without exchange rate must prompt for confirmed rate"
+  );
+
+  elements["tx-rate"].value = "3.75";
+  listeners["tx-rate:input"]();
+  assert.ok(
+    elements["tx-ils-preview"].textContent.includes("₪375.00"),
+    "Entering exchange rate must update converted ILS preview"
+  );
+
+  pass("Transaction modal live preview scoping and interactive behavior verified");
+
+  console.log(`\nALL ${passed} UI & INTEGRITY CHECKS PASSED.`);
+})().catch((err) => {
+  console.error("\nTEST SUITE FAILED:\n", err);
+  process.exit(1);
+});
+
 

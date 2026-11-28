@@ -314,40 +314,6 @@ function setupEventListeners() {
   const txAmountInput = document.getElementById("tx-amount");
   const txCurrencySelect = document.getElementById("tx-currency");
   const txRateInput = document.getElementById("tx-rate");
-  const txPreview = document.getElementById("tx-ils-preview");
-
-  function updateTxPreview() {
-    const amt = Number(txAmountInput?.value) || 0;
-    const curr = txCurrencySelect?.value || "ILS";
-    let rate = Number(txRateInput?.value);
-
-    if (curr === "ILS") {
-      if (txRateInput) {
-        txRateInput.value = "1.0";
-        txRateInput.disabled = true;
-      }
-      if (txPreview) {
-        txPreview.textContent = `Converts to ${formatILS(amt)}`;
-        txPreview.style.color = "";
-      }
-      return;
-    }
-
-    if (txRateInput) txRateInput.disabled = false;
-
-    if (!rate || rate <= 0) {
-      if (txPreview) {
-        txPreview.textContent = `Requires confirmed exchange rate for ${curr}`;
-        txPreview.style.color = "#b91c1c";
-      }
-    } else {
-      const converted = amt * rate;
-      if (txPreview) {
-        txPreview.textContent = `Converts to ${formatILS(converted)} (@ ${rate} ILS/${curr})`;
-        txPreview.style.color = "";
-      }
-    }
-  }
 
   txAmountInput?.addEventListener("input", updateTxPreview);
   txCurrencySelect?.addEventListener("change", (e) => {
@@ -900,6 +866,49 @@ function renderRecurringTable() {
 /* ------------------------------------------------------------------ *
  * Modals & Forms
  * ------------------------------------------------------------------ */
+
+/**
+ * Update currency conversion live preview in the transaction modal.
+ */
+export function updateTxPreview() {
+  const txAmountInput = document.getElementById("tx-amount");
+  const txCurrencySelect = document.getElementById("tx-currency");
+  const txRateInput = document.getElementById("tx-rate");
+  const txPreview = document.getElementById("tx-ils-preview");
+
+  const amt = Number(txAmountInput?.value) || 0;
+  const curr = txCurrencySelect?.value || "ILS";
+  let rate = Number(txRateInput?.value);
+
+  if (curr === "ILS") {
+    if (txRateInput) {
+      txRateInput.value = "1.0";
+      txRateInput.disabled = true;
+    }
+    if (txPreview) {
+      txPreview.textContent = `Converts to ${formatILS(amt)}`;
+      if (txPreview.style) txPreview.style.color = "";
+    }
+    return;
+  }
+
+  if (txRateInput && !txRateInput.title?.includes("Shopify")) {
+    txRateInput.disabled = false;
+  }
+
+  if (!rate || rate <= 0) {
+    if (txPreview) {
+      txPreview.textContent = `Requires confirmed exchange rate for ${curr}`;
+      if (txPreview.style) txPreview.style.color = "#b91c1c";
+    }
+  } else {
+    const converted = amt * rate;
+    if (txPreview) {
+      txPreview.textContent = `Converts to ${formatILS(converted)} (@ ${rate} ILS/${curr})`;
+      if (txPreview.style) txPreview.style.color = "";
+    }
+  }
+}
 
 function openTransactionModal(type = "revenue", existing = null) {
   const modal = document.getElementById("modal-transaction");
