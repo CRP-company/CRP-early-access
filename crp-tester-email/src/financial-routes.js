@@ -37,6 +37,47 @@ import {
 } from "./analytics-engine.js";
 import { syncGooglePlayReports } from "./google-play.js";
 
+export const RECURRING_COLLECTION = "financials/recurring/items";
+
+/**
+ * Retrieve all recurring definitions, querying the canonical 4-segment subcollection
+ * `financials/recurring/items` first, while preserving compatibility with any existing
+ * records in legacy locations.
+ *
+ * @param {object} store Firestore client
+ * @returns {Promise<Array<object>>} List of recurring definitions
+ */
+export async function listRecurringDefinitions(store) {
+  if (!store || typeof store.listCollection !== "function") return [];
+
+  // 1. Primary canonical subcollection: financials/recurring/items (3 segments)
+  let recurring = (await store.listCollection(RECURRING_COLLECTION).catch(() => [])) || [];
+
+  // 2. Compatibility check: if items subcollection returned empty, check legacy paths
+  if (recurring.length === 0) {
+    const rules = (await store.listCollection("financials/recurring/rules").catch(() => [])) || [];
+    if (rules.length > 0) {
+      recurring = rules;
+    } else {
+      const legacy = (await store.listCollection("financials/recurring").catch(() => [])) || [];
+      if (legacy.length > 0) {
+        recurring = legacy;
+      }
+    }
+  }
+
+  // Deduplicate by ID
+  const seen = new Set();
+  const deduped = [];
+  for (const item of recurring) {
+    if (item && item.id && !seen.has(item.id)) {
+      seen.add(item.id);
+      deduped.push(item);
+    }
+  }
+  return deduped;
+}
+
 /**
  * Handle all /financial/* routes.
  *
@@ -95,18 +136,37 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
 
       // Fetch transactions & recurring
       const rawTransactions = await store.listCollection("financials/transactions");
-      const rawRecurring = await store.listCollection("financials/recurring");
-      const rawInstallations = await store.listCollection("analytics/installations");
-      const rawCohorts = await store.listCollection("analytics/cohorts");
+      const rawRecurring = await listRecurringDefinitions(store);
+      let rawInstallations = await store.listCollection("analytics/installations/history");
+      if (!rawInstallations || rawInstallations.length === 0) {
+        rawInstallations = (await store.listCollection("analytics/installations/daily")) || [];
+      }
+      if (!rawInstallations || rawInstallations.length === 0) {
+        rawInstallations = (await store.listCollection("analytics/installations").catch(() => [])) || [];
+      }
+      let rawCohorts = await store.listCollection("analytics/cohorts/history");
+      if (!rawCohorts || rawCohorts.length === 0) {
+        rawCohorts = (await store.listCollection("analytics/cohorts/daily")) || [];
+      }
+      if (!rawCohorts || rawCohorts.length === 0) {
+        rawCohorts = (await store.listCollection("analytics/cohorts").catch(() => [])) || [];
+      }
 
       // Fetch integration statuses
       const shopifyIntegration =
         (await store.getDocument("financials", "shopify_integration").catch(() => null)) ||
         (await store.getDocument("financials/integrations", "shopify").catch(() => null)) ||
         null;
-      const playIntegration = (await store.getDocument("analytics/syncStatus", "google_play")) || null;
+      const playIntegration =
+        (await store.getDocument("analytics/syncStatus/services", "google_play").catch(() => null)) ||
+        (await store.getDocument("analytics", "sync_google_play").catch(() => null)) ||
+        (await store.getDocument("analytics/syncStatus", "google_play").catch(() => null)) ||
+        null;
       const analyticsIntegration =
-        (await store.getDocument("analytics/syncStatus", "firebase_analytics")) || null;
+        (await store.getDocument("analytics/syncStatus/services", "firebase_analytics").catch(() => null)) ||
+        (await store.getDocument("analytics", "sync_firebase_analytics").catch(() => null)) ||
+        (await store.getDocument("analytics/syncStatus", "firebase_analytics").catch(() => null)) ||
+        null;
 
       // Calculate financial summary & chart series
       const summary = calculateFinancialSummary(rawTransactions, rawRecurring, period);
@@ -311,7 +371,7 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
     // ------------------------------------------------------------------ RECURRING DEFINITIONS
     if (path === "/financial/recurring") {
       if (method === "GET") {
-        const recurring = await store.listCollection("financials/recurring");
+        const recurring = await listRecurringDefinitions(store);
         recurring.sort((a, b) =>
           String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
         );
@@ -335,9 +395,98 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
           createdBy: caller.email,
         };
 
-        await store.createDocument("financials/recurring", id, doc);
+        if (typeof store.createDocument === "function") {
+          await store.createDocument(RECURRING_COLLECTION, id, doc);
+        } else {
+          await store.upsertDocument(RECURRING_COLLECTION, id, doc);
+        }
         return jsonResponse(201, { ok: true, recurring: doc }, origin);
       }
+
+      if (method === "DELETE") {
+        let id = url.searchParams.get("id");
+        if (!id) {
+          const body = await request.json().catch(() => ({}));
+          id = body?.id || null;
+        }
+        id = String(id || "").trim();
+        if (!id) return jsonResponse(400, { ok: false, error: "Missing recurring id." }, origin);
+
+        let targetCollection = RECURRING_COLLECTION;
+        let existing = await store.getDocument(targetCollection, id).catch(() => null);
+        if (!existing) {
+          const legacyRules = await store.getDocument("financials/recurring/rules", id).catch(() => null);
+          if (legacyRules) {
+            targetCollection = "financials/recurring/rules";
+            existing = legacyRules;
+          } else {
+            const legacyDirect = await store.getDocument("financials/recurring", id).catch(() => null);
+            if (legacyDirect) {
+              targetCollection = "financials/recurring";
+              existing = legacyDirect;
+            }
+          }
+        }
+        if (!existing) return jsonResponse(404, { ok: false, error: "Recurring rule not found." }, origin);
+
+        if (typeof store.deleteDocument === "function") {
+          try {
+            await store.deleteDocument(RECURRING_COLLECTION, id);
+          } catch {
+            await store.deleteDocument(targetCollection, id);
+          }
+        } else {
+          const deletePatch = { status: "ended", updatedAt: new Date().toISOString() };
+          try {
+            await store.updateDocument(RECURRING_COLLECTION, id, deletePatch);
+          } catch {
+            await store.updateDocument(targetCollection, id, deletePatch);
+          }
+        }
+
+        return jsonResponse(200, { ok: true, id, deleted: true }, origin);
+      }
+    }
+
+    // ------------------------------------------------------------------ RECURRING DELETE (POST ALTERNATIVE)
+    if (path === "/financial/recurring-delete" && method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const id = String(body.id || url.searchParams.get("id") || "").trim();
+      if (!id) return jsonResponse(400, { ok: false, error: "Missing recurring id." }, origin);
+
+      let targetCollection = RECURRING_COLLECTION;
+      let existing = await store.getDocument(targetCollection, id).catch(() => null);
+      if (!existing) {
+        const legacyRules = await store.getDocument("financials/recurring/rules", id).catch(() => null);
+        if (legacyRules) {
+          targetCollection = "financials/recurring/rules";
+          existing = legacyRules;
+        } else {
+          const legacyDirect = await store.getDocument("financials/recurring", id).catch(() => null);
+          if (legacyDirect) {
+            targetCollection = "financials/recurring";
+            existing = legacyDirect;
+          }
+        }
+      }
+      if (!existing) return jsonResponse(404, { ok: false, error: "Recurring rule not found." }, origin);
+
+      if (typeof store.deleteDocument === "function") {
+        try {
+          await store.deleteDocument(RECURRING_COLLECTION, id);
+        } catch {
+          await store.deleteDocument(targetCollection, id);
+        }
+      } else {
+        const deletePatch = { status: "ended", updatedAt: new Date().toISOString() };
+        try {
+          await store.updateDocument(RECURRING_COLLECTION, id, deletePatch);
+        } catch {
+          await store.updateDocument(targetCollection, id, deletePatch);
+        }
+      }
+
+      return jsonResponse(200, { ok: true, id, deleted: true }, origin);
     }
 
     // ------------------------------------------------------------------ RECURRING UPDATE
@@ -346,7 +495,21 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       const id = String(body.id || "").trim();
       if (!id) return jsonResponse(400, { ok: false, error: "Missing recurring id." }, origin);
 
-      const existing = await store.getDocument("financials/recurring", id);
+      let targetCollection = RECURRING_COLLECTION;
+      let existing = await store.getDocument(targetCollection, id).catch(() => null);
+      if (!existing) {
+        const legacyRules = await store.getDocument("financials/recurring/rules", id).catch(() => null);
+        if (legacyRules) {
+          targetCollection = "financials/recurring/rules";
+          existing = legacyRules;
+        } else {
+          const legacyDirect = await store.getDocument("financials/recurring", id).catch(() => null);
+          if (legacyDirect) {
+            targetCollection = "financials/recurring";
+            existing = legacyDirect;
+          }
+        }
+      }
       if (!existing) return jsonResponse(404, { ok: false, error: "Recurring rule not found." }, origin);
 
       const patch = {
@@ -360,13 +523,17 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       if (body.category) patch.category = String(body.category).slice(0, 80);
       if (body.endDate !== undefined) patch.endDate = body.endDate;
 
-      await store.updateDocument("financials/recurring", id, patch);
+      try {
+        await store.updateDocument(RECURRING_COLLECTION, id, patch);
+      } catch {
+        await store.updateDocument(targetCollection, id, patch);
+      }
       return jsonResponse(200, { ok: true, id, patch }, origin);
     }
 
     // ------------------------------------------------------------------ GENERATE RECURRING OCCURRENCES
     if (path === "/financial/recurring/generate" && method === "POST") {
-      const recurringList = await store.listCollection("financials/recurring");
+      const recurringList = await listRecurringDefinitions(store);
       const existingTransactions = await store.listCollection("financials/transactions");
 
       const horizon = new Date();
@@ -549,22 +716,27 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       }
 
       const record = buildInstallationRecord(body);
-      await store.createDocument("analytics/installations", record.date, record).catch(async () => {
-        await store.updateDocument("analytics/installations", record.date, record);
-      });
+      if (typeof store.upsertDocument === "function") {
+        await store.upsertDocument("analytics/installations/history", record.date, record);
+      } else {
+        await store.createDocument("analytics/installations/history", record.date, record).catch(async () => {
+          await store.updateDocument("analytics/installations/history", record.date, record);
+        });
+      }
 
       // Update sync status
-      await store.createDocument("analytics/syncStatus", "google_play", {
+      const syncStatusPayload = {
         connected: true,
         lastSuccessfulSync: new Date().toISOString(),
         syncStatus: "connected",
-      }).catch(async () => {
-        await store.updateDocument("analytics/syncStatus", "google_play", {
-          connected: true,
-          lastSuccessfulSync: new Date().toISOString(),
-          syncStatus: "connected",
+      };
+      if (typeof store.upsertDocument === "function") {
+        await store.upsertDocument("analytics/syncStatus/services", "google_play", syncStatusPayload);
+      } else {
+        await store.createDocument("analytics/syncStatus/services", "google_play", syncStatusPayload).catch(async () => {
+          await store.updateDocument("analytics/syncStatus/services", "google_play", syncStatusPayload);
         });
-      });
+      }
 
       return jsonResponse(200, { ok: true, record }, origin);
     }
@@ -577,22 +749,27 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       }
 
       const record = buildCohortRecord(body);
-      await store.createDocument("analytics/cohorts", record.cohortDate, record).catch(async () => {
-        await store.updateDocument("analytics/cohorts", record.cohortDate, record);
-      });
+      if (typeof store.upsertDocument === "function") {
+        await store.upsertDocument("analytics/cohorts/history", record.cohortDate, record);
+      } else {
+        await store.createDocument("analytics/cohorts/history", record.cohortDate, record).catch(async () => {
+          await store.updateDocument("analytics/cohorts/history", record.cohortDate, record);
+        });
+      }
 
       // Update sync status
-      await store.createDocument("analytics/syncStatus", "firebase_analytics", {
+      const syncStatusPayload = {
         connected: true,
         lastSuccessfulSync: new Date().toISOString(),
         syncStatus: "connected",
-      }).catch(async () => {
-        await store.updateDocument("analytics/syncStatus", "firebase_analytics", {
-          connected: true,
-          lastSuccessfulSync: new Date().toISOString(),
-          syncStatus: "connected",
+      };
+      if (typeof store.upsertDocument === "function") {
+        await store.upsertDocument("analytics/syncStatus/services", "firebase_analytics", syncStatusPayload);
+      } else {
+        await store.createDocument("analytics/syncStatus/services", "firebase_analytics", syncStatusPayload).catch(async () => {
+          await store.updateDocument("analytics/syncStatus/services", "firebase_analytics", syncStatusPayload);
         });
-      });
+      }
 
       return jsonResponse(200, { ok: true, record }, origin);
     }

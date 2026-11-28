@@ -848,6 +848,9 @@ function renderRecurringTable() {
           <button class="btn btn-rec-toggle" data-id="${escapeHtml(r.id)}" data-status="${r.status}" type="button">
             ${r.status === 'active' ? 'Pause' : 'Activate'}
           </button>
+          <button class="btn btn--danger btn-rec-delete" data-id="${escapeHtml(r.id)}" type="button" title="Delete rule">
+            Delete
+          </button>
         </td>
       </tr>
     `;
@@ -865,6 +868,25 @@ function renderRecurringTable() {
           body: { id, status: newStatus },
         });
         showToast(`Recurring rule ${newStatus}.`, "ok");
+        loadRecurring();
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  tbody.querySelectorAll(".btn-rec-delete").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      if (!confirm("Are you sure you want to delete this recurring arrangement?")) return;
+      btn.disabled = true;
+      try {
+        await callWorker(`/financial/recurring?id=${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        showToast("Recurring rule deleted.", "ok");
         loadRecurring();
       } catch (err) {
         showToast(err.message, "error");

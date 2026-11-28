@@ -505,7 +505,7 @@ describe("Google Play Bulk Reports Ingestion Engine", () => {
       expect(result.subrequestsUsed).toBeLessThanOrEqual(10); // NEVER exceeds 10!
 
       // Verify that this month was NOT marked complete in syncedMonths
-      const status = inMemoryFirestore.get("analytics/syncStatus/google_play");
+      const status = inMemoryFirestore.get("analytics/syncStatus/services/google_play");
       expect(status.syncedMonths).toEqual([]); // Empty because not fully finished
       expect(status.syncStatus).toBe("syncing");
       expect(status.connected).toBeUndefined(); // Not marked connected
@@ -549,7 +549,7 @@ describe("Google Play Bulk Reports Ingestion Engine", () => {
       expect(result.filesDiscovered).toBe(0);
       expect(result.errors).toHaveLength(1);
 
-      const status = inMemoryFirestore.get("analytics/syncStatus/google_play");
+      const status = inMemoryFirestore.get("analytics/syncStatus/services/google_play");
       expect(status.connected).toBe(false);
       expect(status.syncStatus).toBe("no_reports_found");
     });
@@ -595,7 +595,7 @@ describe("Google Play Bulk Reports Ingestion Engine", () => {
       expect(result.monthUnavailable).toBe(true);
       expect(result.errors[0]).toContain("unavailable");
 
-      const status = inMemoryFirestore.get("analytics/syncStatus/google_play");
+      const status = inMemoryFirestore.get("analytics/syncStatus/services/google_play");
       expect(status.syncStatus).toBe("failed");
       expect(status.lastError).toContain("unavailable");
     });
@@ -626,7 +626,7 @@ describe("Google Play Bulk Reports Ingestion Engine", () => {
       });
 
       const inMemoryFirestore = new Map();
-      inMemoryFirestore.set("analytics/syncStatus/google_play", {
+      inMemoryFirestore.set("analytics/syncStatus/services/google_play", {
         connected: true,
         syncStatus: "connected",
         lastSuccessfulSync: prevSyncTime,
@@ -653,7 +653,7 @@ describe("Google Play Bulk Reports Ingestion Engine", () => {
       expect(result.success).toBe(false);
       expect(result.errors).toHaveLength(1);
 
-      const status = inMemoryFirestore.get("analytics/syncStatus/google_play");
+      const status = inMemoryFirestore.get("analytics/syncStatus/services/google_play");
       expect(status.lastSuccessfulSync).toBe(prevSyncTime); // PRESERVED!
       expect(status.syncStatus).toBe("failed");
     });

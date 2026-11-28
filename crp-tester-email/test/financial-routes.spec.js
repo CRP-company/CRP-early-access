@@ -382,6 +382,10 @@ describe("Financial API Routes & Security", () => {
 
     const createRes = await worker.fetch(createReq, env);
     expect(createRes.status).toBe(201);
+    const createBody = await createRes.json();
+    expect(createBody.ok).toBe(true);
+    expect(createBody.recurring.id).toMatch(/^rec_/);
+    expect(store.get(`financials/recurring/items/${createBody.recurring.id}`)).toBeDefined();
 
     // 2. Generate occurrences
     const genReq = new Request("https://worker.local/financial/recurring/generate", {
@@ -399,6 +403,73 @@ describe("Financial API Routes & Security", () => {
     const genBody = await genRes.json();
     expect(genBody.ok).toBe(true);
     expect(genBody.generatedCount).toBeGreaterThanOrEqual(1);
+
+    // 3. Update recurring rule (pause)
+    const updateReq = new Request("https://worker.local/financial/recurring-update", {
+      method: "POST",
+      headers: {
+        Origin: ORIGIN,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id: createBody.recurring.id, status: "paused" }),
+    });
+
+    const updateRes = await worker.fetch(updateReq, env);
+    expect(updateRes.status).toBe(200);
+    const updatedDoc = store.get(`financials/recurring/items/${createBody.recurring.id}`);
+    expect(updatedDoc.status).toBe("paused");
+
+    // 4. Delete recurring rule
+    const delReq = new Request(`https://worker.local/financial/recurring?id=${createBody.recurring.id}`, {
+      method: "DELETE",
+      headers: {
+        Origin: ORIGIN,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const delRes = await worker.fetch(delReq, env);
+    expect(delRes.status).toBe(200);
+    expect(store.has(`financials/recurring/items/${createBody.recurring.id}`)).toBe(false);
+  });
+
+  it("GET /financial/recurring preserves compatibility by loading legacy recurring records", async () => {
+    const freshTime = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      email: "owner@crp.com",
+      role: "owner",
+      admin: true,
+      auth_time: freshTime,
+    });
+
+    // Populate a legacy recurring rule in financials/recurring (legacy location)
+    store.set("financials/recurring/rec_legacy_999", {
+      id: "rec_legacy_999",
+      description: "Legacy SaaS Rule",
+      amount: 100,
+      currency: "ILS",
+      amountILS: 100,
+      frequency: "monthly",
+      status: "active",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const req = new Request("https://worker.local/financial/recurring", {
+      method: "GET",
+      headers: {
+        Origin: ORIGIN,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.recurring).toHaveLength(1);
+    expect(body.recurring[0].id).toBe("rec_legacy_999");
+    expect(body.recurring[0].description).toBe("Legacy SaaS Rule");
   });
 
   it("processes valid Shopify webhooks and rejects invalid signatures", async () => {
@@ -1221,23 +1292,23 @@ describe("Financial API Routes & Security", () => {
       expect(syncBody.recordsImported).toBe(2);
       expect(syncBody.latestReportDate).toBe("2026-11-26");
 
-      // Verify records stored in analytics/installations
-      const nov25 = store.get("analytics/installations/2026-11-25");
+      // Verify records stored in analytics/installations/history
+      const nov25 = store.get("analytics/installations/history/2026-11-25");
       expect(nov25).toBeDefined();
       expect(nov25.firstTimeInstalls).toBe(40);
       expect(nov25.activeDeviceInstalls).toBe(350);
       expect(nov25.installsOnActiveDevices).toBe(350);
       expect(nov25.currentDeviceInstalls).toBe(400);
 
-      const nov26 = store.get("analytics/installations/2026-11-26");
+      const nov26 = store.get("analytics/installations/history/2026-11-26");
       expect(nov26).toBeDefined();
       expect(nov26.firstTimeInstalls).toBe(50);
       expect(nov26.activeDeviceInstalls).toBe(395);
       expect(nov26.installsOnActiveDevices).toBe(395);
       expect(nov26.currentDeviceInstalls).toBe(450);
 
-      // Verify analytics/syncStatus/google_play stored
-      const playStatus = store.get("analytics/syncStatus/google_play");
+      // Verify analytics/syncStatus/services/google_play stored
+      const playStatus = store.get("analytics/syncStatus/services/google_play");
       expect(playStatus).toBeDefined();
       expect(playStatus.connected).toBe(true);
       expect(playStatus.syncStatus).toBe("connected");
@@ -1287,10 +1358,85 @@ describe("Financial API Routes & Security", () => {
       expect(body.error).toContain("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured");
 
       // Verify syncStatus was recorded as failed in Firestore
-      const playStatus = store.get("analytics/syncStatus/google_play");
+      const playStatus = store.get("analytics/syncStatus/services/google_play");
       expect(playStatus).toBeDefined();
       expect(playStatus.syncStatus).toBe("failed");
       expect(playStatus.connected).toBeUndefined();
+    });
+
+    it("POST /financial/analytics/installations stores record under analytics/installations/history", async () => {
+      const freshTime = Math.floor(Date.now() / 1000);
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: freshTime,
+      });
+
+      const req = new Request("https://worker.local/financial/analytics/installations", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          date: "2026-11-28",
+          firstTimeInstalls: 75,
+          activeDeviceInstalls: 500,
+        }),
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+
+      const saved = store.get("analytics/installations/history/2026-11-28");
+      expect(saved).toBeDefined();
+      expect(saved.firstTimeInstalls).toBe(75);
+      expect(saved.activeDeviceInstalls).toBe(500);
+
+      const status = store.get("analytics/syncStatus/services/google_play");
+      expect(status).toBeDefined();
+      expect(status.connected).toBe(true);
+    });
+
+    it("POST /financial/analytics/cohorts stores record under analytics/cohorts/history", async () => {
+      const freshTime = Math.floor(Date.now() / 1000);
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: freshTime,
+      });
+
+      const req = new Request("https://worker.local/financial/analytics/cohorts", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          cohortDate: "2026-11-01",
+          cohortSize: 200,
+          d7ActiveUsers: 80,
+        }),
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+
+      const saved = store.get("analytics/cohorts/history/2026-11-01");
+      expect(saved).toBeDefined();
+      expect(saved.cohortSize).toBe(200);
+
+      const status = store.get("analytics/syncStatus/services/firebase_analytics");
+      expect(status).toBeDefined();
+      expect(status.connected).toBe(true);
     });
   });
 });

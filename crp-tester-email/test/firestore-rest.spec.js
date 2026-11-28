@@ -112,14 +112,60 @@ describe("createDocument is unchanged", () => {
     const url = new URL(calls[0].url);
     expect(url.searchParams.get("currentDocument.exists")).toBe("false");
   });
+
+  it("creates recurring financial records with exact 4-segment resource path under financials/recurring/items", async () => {
+    calls = [];
+    stub();
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    const recId = "rec_1795867472430_6typd";
+
+    const resourcePath = store.docPath("financials/recurring/items", recId);
+    expect(resourcePath).toBe(
+      `projects/crp-cuby-display/databases/(default)/documents/financials/recurring/items/${recId}`,
+    );
+
+    await store.createDocument("financials/recurring/items", recId, {
+      description: "Cloud Hosting",
+      amount: 45,
+      frequency: "monthly",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.method).toBe("PATCH");
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe(
+      `/v1/projects/crp-cuby-display/databases/(default)/documents/financials/recurring/items/${recId}`,
+    );
+    expect(url.searchParams.get("currentDocument.exists")).toBe("false");
+  });
 });
 
 describe("upsertDocument", () => {
+  it("generates the exact Firestore document resource path following the required collection/document hierarchy", () => {
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    const resourcePath = store.docPath("analytics/installations/history", "2026-05-03");
+    expect(resourcePath).toBe(
+      "projects/crp-cuby-display/databases/(default)/documents/analytics/installations/history/2026-05-03",
+    );
+
+    const docUrl = store.docName("analytics/installations/history", "2026-05-03");
+    expect(docUrl).toBe(
+      "https://firestore.googleapis.com/v1/projects/crp-cuby-display/databases/(default)/documents/analytics/installations/history/2026-05-03",
+    );
+  });
+
+  it("rejects invalid odd-segment document paths before sending requests", async () => {
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(
+      store.upsertDocument("analytics/installations", "2026-05-03", { firstTimeInstalls: 10 }),
+    ).rejects.toThrow(/Firestore document path must have an even number of segments/);
+  });
+
   it("performs an unconditional upsert in a single PATCH request without currentDocument.exists", async () => {
     calls = [];
     stub();
     const store = createFirestore(SECRET, "crp-cuby-display");
-    await store.upsertDocument("analytics/installations", "2026-11-20", {
+    await store.upsertDocument("analytics/installations/history", "2026-11-20", {
       firstTimeInstalls: 25,
       activeDeviceInstalls: 150,
     });
@@ -128,6 +174,9 @@ describe("upsertDocument", () => {
     expect(calls[0].init.method).toBe("PATCH");
     const url = new URL(calls[0].url);
     expect(url.searchParams.get("currentDocument.exists")).toBeNull();
+    expect(url.pathname).toBe(
+      "/v1/projects/crp-cuby-display/databases/(default)/documents/analytics/installations/history/2026-11-20",
+    );
     expect(url.searchParams.getAll("updateMask.fieldPaths").sort()).toEqual([
       "activeDeviceInstalls",
       "firstTimeInstalls",
@@ -142,7 +191,7 @@ describe("upsertDocument", () => {
     calls = [];
     stub();
     const store = createFirestore(SECRET, "crp-cuby-display");
-    const ok = await store.upsertDocument("analytics/installations", "2026-11-20", {
+    const ok = await store.upsertDocument("analytics/installations/history", "2026-11-20", {
       firstTimeInstalls: 30,
     });
     expect(ok).toBe(true);
@@ -183,7 +232,7 @@ describe("upsertDocument", () => {
     });
 
     const store = createFirestore(SECRET, "crp-cuby-display");
-    await store.upsertDocument("analytics/installations", "2026-11-20", {
+    await store.upsertDocument("analytics/installations/history", "2026-11-20", {
       firstTimeInstalls: 45,
     });
 
@@ -212,7 +261,7 @@ describe("upsertDocument", () => {
     };
 
     const store = createFirestore(SECRET, "crp-cuby-display");
-    await store.upsertDocument("analytics/installations", "2026-11-20", dailyRecord);
+    await store.upsertDocument("analytics/installations/history", "2026-11-20", dailyRecord);
 
     expect(calls).toHaveLength(1);
     const url = new URL(calls[0].url);
@@ -236,7 +285,7 @@ describe("upsertDocument", () => {
     };
 
     const store = createFirestore(SECRET, "crp-cuby-display");
-    await store.upsertDocument("analytics/syncStatus", "google_play", failedStatus);
+    await store.upsertDocument("analytics/syncStatus/services", "google_play", failedStatus);
 
     expect(calls).toHaveLength(1);
     const url = new URL(calls[0].url);
@@ -257,8 +306,8 @@ describe("upsertDocument", () => {
 
     const store = createFirestore(SECRET, "crp-cuby-display");
     await expect(
-      store.upsertDocument("analytics/installations", "2026-11-20", { firstTimeInstalls: 10 }),
-    ).rejects.toThrow(/upsert analytics\/installations\/2026-11-20 failed \(403\)/);
+      store.upsertDocument("analytics/installations/history", "2026-11-20", { firstTimeInstalls: 10 }),
+    ).rejects.toThrow(/upsert analytics\/installations\/history\/2026-11-20 failed \(403\)/);
   });
 });
 

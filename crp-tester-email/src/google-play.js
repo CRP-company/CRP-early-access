@@ -23,6 +23,10 @@ export const DEFAULT_GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.rea
 export const DEFAULT_PACKAGE_NAME = "com.crp.focus";
 export const DEFAULT_REPORTS_PREFIX = "stats/installs/";
 
+export const PLAY_INSTALLATIONS_COLLECTION = "analytics/installations/history";
+export const PLAY_SYNC_STATUS_COLLECTION = "analytics/syncStatus/services";
+export const PLAY_SYNC_STATUS_DOC = "google_play";
+
 /**
  * Supported documented Google Play installation report dimensions.
  * Undocumented names (such as "overview") are strictly excluded.
@@ -816,7 +820,7 @@ export async function downloadGooglePlayReport({ bucket, objectName, token, budg
  *
  * Resumable Continuation:
  * - Ingests 1 month (or remaining days of a month) per invocation.
- * - Idempotently updates Firestore `analytics/installations/{date}`.
+ * - Idempotently updates Firestore `analytics/installations/history/{date}`.
  * - Returns `hasMore: true` and `nextMonth: YYYYMM` when more months or days remain.
  * - Empty bucket or missing files explicitly reports status and does not claim false success.
  *
@@ -843,7 +847,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
   if (!env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON) {
     const err = new Error("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured. Please set the secret in Wrangler.");
     if (store && typeof store.upsertDocument === "function") {
-      await store.upsertDocument("analytics/syncStatus", "google_play", {
+      await store.upsertDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC, {
         syncStatus: "failed",
         lastAttemptedSync: new Date().toISOString(),
         lastError: err.message,
@@ -864,7 +868,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
     const sanitized = sanitizeErrorMessage(initErr.message);
     if (budget.remaining >= 1 && store && typeof store.upsertDocument === "function") {
       budget.recordRequest(1);
-      await store.upsertDocument("analytics/syncStatus", "google_play", {
+      await store.upsertDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC, {
         syncStatus: "failed",
         lastAttemptedSync: new Date().toISOString(),
         lastError: sanitized,
@@ -881,7 +885,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
     const errMsg = `No Google Play installation reports found in bucket "${bucket}" for package "${packageName}".`;
     if (budget.remaining >= 1 && store && typeof store.upsertDocument === "function") {
       budget.recordRequest(1);
-      await store.upsertDocument("analytics/syncStatus", "google_play", {
+      await store.upsertDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC, {
         connected: false,
         syncStatus: "no_reports_found",
         lastAttemptedSync: nowIso,
@@ -920,7 +924,10 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
   let existingStatus = null;
   if (budget.canAfford(1) && store && typeof store.getDocument === "function") {
     budget.recordRequest(1);
-    existingStatus = await store.getDocument("analytics/syncStatus", "google_play").catch(() => null);
+    existingStatus =
+      (await store.getDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC).catch(() => null)) ||
+      (await store.getDocument("analytics", "sync_google_play").catch(() => null)) ||
+      (await store.getDocument("analytics/syncStatus", "google_play").catch(() => null));
   }
 
   const alreadySyncedMonths = new Set(existingStatus?.syncedMonths || []);
@@ -934,7 +941,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
       const errMsg = `Google Play report for month "${targetMonth}" is unavailable.`;
       if (budget.remaining >= 1 && store && typeof store.upsertDocument === "function") {
         budget.recordRequest(1);
-        await store.upsertDocument("analytics/syncStatus", "google_play", {
+        await store.upsertDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC, {
           syncStatus: "failed",
           lastAttemptedSync: nowIso,
           lastError: errMsg,
@@ -1015,7 +1022,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
     }
 
     try {
-      await store.upsertDocument("analytics/installations", date, record);
+      await store.upsertDocument(PLAY_INSTALLATIONS_COLLECTION, date, record);
       budget.recordRequest(1);
       recordsImported++;
     } catch (writeErr) {
@@ -1063,7 +1070,7 @@ export async function syncGooglePlayReports({ env, store, targetMonth = null, bu
 
   if (budget.remaining >= 1 && store && typeof store.upsertDocument === "function") {
     budget.recordRequest(1);
-    await store.upsertDocument("analytics/syncStatus", "google_play", statusData).catch(() => {});
+    await store.upsertDocument(PLAY_SYNC_STATUS_COLLECTION, PLAY_SYNC_STATUS_DOC, statusData).catch(() => {});
   }
 
   return {

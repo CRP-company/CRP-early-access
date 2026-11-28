@@ -236,7 +236,15 @@ export function createFirestore(secretJson, projectId) {
    * @param {object} data
    */
   async function upsertDocument(collection, id, data) {
-    const url = pathUrl(`${collection}/${id}`);
+    const fullPath = `${String(collection).replace(/^\/+|\/+$/g, "")}/${String(id).replace(/^\/+|\/+$/g, "")}`;
+    const parts = fullPath.split("/").filter(Boolean);
+    if (parts.length < 2 || parts.length % 2 !== 0) {
+      throw new Error(
+        `upsert ${collection}/${id} failed: Firestore document path must have an even number of segments (collection/document[/subcollection/document...]), got "${fullPath}" (${parts.length} segments).`,
+      );
+    }
+
+    const url = pathUrl(fullPath);
     for (const field of Object.keys(data)) {
       url.searchParams.append("updateMask.fieldPaths", field);
     }
@@ -739,5 +747,6 @@ export function createFirestore(secretJson, projectId) {
     rejectRequestAndReleaseMarker,
     releaseRejectedRequestMarker,
     docName,
+    docPath,
   };
 }
