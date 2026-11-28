@@ -192,6 +192,78 @@ function setupEventListeners() {
     }
   });
 
+  // Google Play Manual Sync Button
+  document.getElementById("btn-sync-play")?.addEventListener("click", async (e) => {
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "Syncing…";
+    try {
+      const MAX_CONTINUATION_STEPS = 36;
+      const MAX_ATTEMPTS_PER_MONTH = 3;
+      const monthAttempts = {};
+      let totalImported = 0;
+      let iterations = 0;
+      let currentTarget = null;
+      let res = null;
+
+      while (iterations < MAX_CONTINUATION_STEPS) {
+        iterations++;
+        const url = currentTarget
+          ? `/financial/play/sync?month=${encodeURIComponent(currentTarget)}`
+          : "/financial/play/sync";
+
+        res = await callWorker(url, { method: "POST" });
+
+        // Stop immediately on any failed or unparseable response
+        if (!res || !res.ok || (res.success === false && res.filesDiscovered !== 0)) {
+          const errDetail = res?.errors?.[0] || res?.error || "Google Play sync failed.";
+          throw new Error(errDetail);
+        }
+
+        // Explicit empty bucket / no files check: do not produce a false successful sync
+        if (res.filesDiscovered === 0 || res.totalMonthsDiscovered === 0) {
+          showToast("No Google Play bulk report files found in bucket.", "info");
+          loadAllFinancialData();
+          return;
+        }
+
+        totalImported += res.recordsImported || 0;
+
+        // Stop when backfill is complete
+        if (res.complete === true || !res.hasMore || !res.nextMonth) {
+          break;
+        }
+
+        // Prevent infinite loops on the same month
+        const nextMonth = res.nextMonth;
+        monthAttempts[nextMonth] = (monthAttempts[nextMonth] || 0) + 1;
+        if (monthAttempts[nextMonth] > MAX_ATTEMPTS_PER_MONTH) {
+          throw new Error(`Sync stopped: Month ${nextMonth} failed to complete after ${MAX_ATTEMPTS_PER_MONTH} attempts.`);
+        }
+
+        currentTarget = nextMonth;
+        btn.textContent = `Syncing (${nextMonth}…)`;
+      }
+
+      // Check if hard limit was reached while more work remains
+      if (iterations >= MAX_CONTINUATION_STEPS && res && res.hasMore && !res.complete) {
+        showToast(
+          `Google Play sync paused: Maximum continuation limit reached (${MAX_CONTINUATION_STEPS} steps). ${totalImported} records imported. Click Sync again to continue.`,
+          "warning",
+        );
+      } else {
+        showToast(`Google Play synchronized: ${totalImported} daily records imported.`, "ok");
+      }
+
+      loadAllFinancialData();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sync Google Play";
+    }
+  });
+
   // Generate Recurring Occurrences Button
   document.getElementById("btn-generate-occurrences")?.addEventListener("click", async (e) => {
     const btn = e.target;

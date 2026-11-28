@@ -35,6 +35,7 @@ import {
   buildInstallationRecord,
   aggregateInstallationMetrics,
 } from "./analytics-engine.js";
+import { syncGooglePlayReports } from "./google-play.js";
 
 /**
  * Handle all /financial/* routes.
@@ -147,7 +148,7 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
               error: shopifyIntegration?.lastError || null,
             },
             googlePlay: {
-              connected: Boolean(playIntegration?.connected || env.GOOGLE_PLAY_REPORT_BUCKET),
+              connected: Boolean(playIntegration?.connected),
               lastSync: playIntegration?.lastSuccessfulSync || null,
               status: playIntegration?.syncStatus || "not_configured",
               error: playIntegration?.lastError || null,
@@ -521,6 +522,23 @@ export async function handleFinancial(request, url, env, jsonResponse, origin) {
       });
 
       return jsonResponse(syncResult.success ? 200 : 502, syncResult, origin);
+    }
+
+    // ------------------------------------------------------------------ GOOGLE PLAY BULK SYNC
+    if (path === "/financial/play/sync" && method === "POST") {
+      try {
+        let bodyMonth = null;
+        try {
+          const body = await request.clone().json().catch(() => ({}));
+          bodyMonth = body?.month || null;
+        } catch {}
+        const targetMonth = url.searchParams.get("month") || bodyMonth || null;
+        const syncResult = await syncGooglePlayReports({ env, store, targetMonth });
+        const statusCode = syncResult.ok && syncResult.filesDiscovered === 0 ? 200 : syncResult.success ? 200 : 502;
+        return jsonResponse(statusCode, syncResult, origin);
+      } catch (err) {
+        return jsonResponse(500, { ok: false, error: err.message }, origin);
+      }
     }
 
     // ------------------------------------------------------------------ INGEST PLAY INSTALLATIONS

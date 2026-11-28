@@ -62,6 +62,34 @@ beforeEach(async () => {
       });
     }
 
+    // Google Cloud Storage bulk reports API
+    if (s.includes("storage.googleapis.com/storage/v1/b/")) {
+      if (s.includes("alt=media")) {
+        const csvContent =
+          "Date,Package Name,Country,Daily Device Installs,Daily Device Uninstalls,Daily Device Upgrades,Current Device Installs,Installs on active devices,Install events\n" +
+          "2026-11-25,com.crp.focus,US,40,5,2,400,350,45\n" +
+          "2026-11-26,com.crp.focus,US,50,3,4,450,395,58\n";
+        return new Response(new TextEncoder().encode(csvContent), {
+          status: 200,
+          headers: { "Content-Type": "text/csv" },
+        });
+      }
+
+      // Object listing
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              name: "stats/installs/installs_com.crp.focus_202611_country.csv",
+              size: "1024",
+              updated: "2026-11-26T12:00:00Z",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
     // Shopify OAuth token exchange / refresh
     if (s.includes("/admin/oauth/access_token")) {
       return new Response(
@@ -132,6 +160,22 @@ beforeEach(async () => {
             });
           }
         }
+
+        // In real Firestore, if the subcollection or parent document has not been created,
+        // Firestore REST returns 404 NOT_FOUND.
+        if (matchingDocs.length === 0 && !store.has(path)) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 404,
+                message: `Document "projects/${PROJECT}/databases/(default)/documents/${path}" not found.`,
+                status: "NOT_FOUND",
+              },
+            }),
+            { status: 404, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
         return new Response(JSON.stringify({ documents: matchingDocs }), { status: 200 });
       }
 
@@ -164,8 +208,16 @@ beforeEach(async () => {
     client_email: "test@example.com",
   });
 
+  env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({
+    project_id: PROJECT,
+    private_key: privateKeyPem,
+    client_email: "crp-play-reporter@crp-cuby-display.iam.gserviceaccount.com",
+  });
+  env.GOOGLE_PLAY_REPORT_BUCKET = "pubsite_prod_7397695133408217043";
+
   (await import("../src/auth.js")).__resetKeyCache();
   (await import("../src/oauth.js")).__resetTokenCache();
+  (await import("../src/google-play.js")).__resetPlayTokenCache();
 });
 
 async function mintToken(claims) {
@@ -1044,6 +1096,201 @@ describe("Financial API Routes & Security", () => {
       expect(tx).toBeDefined();
       expect(tx.amount).toBe(350);
       expect(tx.status).toBe("paid");
+    });
+
+    it("GET /financial/overview succeeds and reports Shopify connected when subcollections return 404 NOT_FOUND", async () => {
+      const freshTime = Math.floor(Date.now() / 1000);
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: freshTime,
+      });
+
+      // Set ONLY shopify_integration — no transactions, recurring, installations, or cohorts exist
+      store.set("financials/shopify_integration", {
+        connected: true,
+        shopDomain: "scxtax-ra.myshopify.com",
+        syncStatus: "connected",
+        scope: "read_orders",
+        accessToken: "shpat_mock_offline_token",
+        refreshToken: "shpr_mock_refresh_token",
+        lastSuccessfulSync: null,
+      });
+
+      const req = new Request("https://worker.local/financial/overview", {
+        method: "GET",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+
+      // Verify Shopify integration status is reported as connected
+      expect(body.integrations.shopify.connected).toBe(true);
+      expect(body.integrations.shopify.status).toBe("connected");
+      expect(body.integrations.shopify.lastSync).toBeNull();
+
+      // Verify empty collections were handled cleanly without errors
+      expect(body.summary.grossRevenue).toBe(0);
+      expect(body.summary.totalRevenue).toBe(0);
+      expect(body.kpis.totalInstalls).toBe(0);
+      expect(body.charts.financials).toHaveLength(12);
+    });
+
+    it("POST /financial/play/sync rejects unauthenticated requests with 401", async () => {
+      const req = new Request("https://worker.local/financial/play/sync", {
+        method: "POST",
+        headers: { Origin: ORIGIN },
+      });
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(401);
+    });
+
+    it("POST /financial/play/sync rejects non-financial admin with 403", async () => {
+      const token = await mintToken({
+        email: "staff@crp.com",
+        role: "admin",
+        admin: true,
+        financials: false,
+        auth_time: Math.floor(Date.now() / 1000),
+      });
+
+      const req = new Request("https://worker.local/financial/play/sync", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(403);
+    });
+
+    it("POST /financial/play/sync rejects stale step-up authentication", async () => {
+      const staleTime = Math.floor(Date.now() / 1000) - 1000;
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: staleTime,
+      });
+
+      const req = new Request("https://worker.local/financial/play/sync", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.code).toBe("REAUTH_REQUIRED");
+    });
+
+    it("POST /financial/play/sync executes sync, saves records, and updates overview status", async () => {
+      const freshTime = Math.floor(Date.now() / 1000);
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: freshTime,
+      });
+
+      const syncReq = new Request("https://worker.local/financial/play/sync", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const syncRes = await worker.fetch(syncReq, env);
+      expect(syncRes.status).toBe(200);
+      const syncBody = await syncRes.json();
+      expect(syncBody.ok).toBe(true);
+      expect(syncBody.success).toBe(true);
+      expect(syncBody.filesDiscovered).toBe(1);
+      expect(syncBody.filesProcessed).toBe(1);
+      expect(syncBody.recordsImported).toBe(2);
+      expect(syncBody.latestReportDate).toBe("2026-11-26");
+
+      // Verify records stored in analytics/installations
+      const nov25 = store.get("analytics/installations/2026-11-25");
+      expect(nov25).toBeDefined();
+      expect(nov25.firstTimeInstalls).toBe(40);
+      expect(nov25.activeDeviceInstalls).toBe(350);
+      expect(nov25.installsOnActiveDevices).toBe(350);
+      expect(nov25.currentDeviceInstalls).toBe(400);
+
+      const nov26 = store.get("analytics/installations/2026-11-26");
+      expect(nov26).toBeDefined();
+      expect(nov26.firstTimeInstalls).toBe(50);
+      expect(nov26.activeDeviceInstalls).toBe(395);
+      expect(nov26.installsOnActiveDevices).toBe(395);
+      expect(nov26.currentDeviceInstalls).toBe(450);
+
+      // Verify analytics/syncStatus/google_play stored
+      const playStatus = store.get("analytics/syncStatus/google_play");
+      expect(playStatus).toBeDefined();
+      expect(playStatus.connected).toBe(true);
+      expect(playStatus.syncStatus).toBe("connected");
+      expect(playStatus.recordsImported).toBe(2);
+
+      // Now verify GET /financial/overview reports Google Play connected
+      const overviewReq = new Request("https://worker.local/financial/overview", {
+        method: "GET",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const overviewRes = await worker.fetch(overviewReq, env);
+      expect(overviewRes.status).toBe(200);
+      const overviewBody = await overviewRes.json();
+      expect(overviewBody.integrations.googlePlay.connected).toBe(true);
+      expect(overviewBody.integrations.googlePlay.status).toBe("connected");
+      expect(overviewBody.integrations.googlePlay.lastSync).not.toBeNull();
+      expect(overviewBody.kpis.totalInstalls).toBe(90); // 40 + 50
+    });
+
+    it("POST /financial/play/sync returns 500 when credentials are missing and does not mark connected", async () => {
+      const freshTime = Math.floor(Date.now() / 1000);
+      const token = await mintToken({
+        email: "owner@crp.com",
+        role: "owner",
+        admin: true,
+        auth_time: freshTime,
+      });
+
+      const envWithoutKey = { ...env, GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: "" };
+
+      const syncReq = new Request("https://worker.local/financial/play/sync", {
+        method: "POST",
+        headers: {
+          Origin: ORIGIN,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const syncRes = await worker.fetch(syncReq, envWithoutKey);
+      expect(syncRes.status).toBe(500);
+      const body = await syncRes.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured");
+
+      // Verify syncStatus was recorded as failed in Firestore
+      const playStatus = store.get("analytics/syncStatus/google_play");
+      expect(playStatus).toBeDefined();
+      expect(playStatus.syncStatus).toBe("failed");
+      expect(playStatus.connected).toBeUndefined();
     });
   });
 });

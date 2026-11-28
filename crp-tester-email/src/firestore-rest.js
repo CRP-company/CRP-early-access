@@ -226,6 +226,35 @@ export function createFirestore(secretJson, projectId) {
     return true;
   }
 
+  /**
+   * Idempotently upsert fields into a document in a single HTTP request.
+   * Creates the document if it does not exist; updates specified fields if it exists.
+   * Does NOT pass currentDocument.exists precondition.
+   *
+   * @param {string} collection
+   * @param {string} id
+   * @param {object} data
+   */
+  async function upsertDocument(collection, id, data) {
+    const url = pathUrl(`${collection}/${id}`);
+    for (const field of Object.keys(data)) {
+      url.searchParams.append("updateMask.fieldPaths", field);
+    }
+
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: await authHeaders(),
+      body: JSON.stringify({ fields: encodeFields(data) }),
+    });
+
+    if (!res.ok) {
+      const err = new Error(`upsert ${collection}/${id} failed (${res.status}): ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
+    return true;
+  }
+
   async function beginTransaction() {
     const res = await fetch(`${base}:beginTransaction`, {
       method: "POST",
@@ -289,6 +318,26 @@ export function createFirestore(secretJson, projectId) {
       if (pageToken) url.searchParams.set("pageToken", pageToken);
 
       const res = await fetch(url, { headers: await authHeaders() });
+
+      // When a collection or parent document does not exist yet, Firestore returns 404 NOT_FOUND.
+      // Treat a genuine Firestore NOT_FOUND error on initial list as an empty collection ([]).
+      // Validate the response body so unrelated 404s (e.g. gateway/proxy errors) still throw.
+      if (res.status === 404) {
+        if (!pageToken) {
+          let errJson = null;
+          try {
+            errJson = await res.json();
+          } catch {
+            throw new Error("Firestore list failed (404): non-JSON 404 response");
+          }
+          if (errJson?.error?.status === "NOT_FOUND") {
+            return [];
+          }
+          throw new Error(`Firestore list failed (404): ${JSON.stringify(errJson)}`);
+        }
+        throw new Error(`Firestore list failed (404) during pagination: ${await res.text()}`);
+      }
+
       if (!res.ok) throw new Error(`Firestore list failed (${res.status}): ${await res.text()}`);
 
       const json = await res.json();
@@ -677,6 +726,7 @@ export function createFirestore(secretJson, projectId) {
     getDocument,
     createDocument,
     updateDocument,
+    upsertDocument,
     deleteDocument,
     patchTester,
     listCollection,

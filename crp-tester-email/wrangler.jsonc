@@ -26,7 +26,8 @@
 		"FIREBASE_PROJECT_ID": "crp-cuby-display",
 		"ADMIN_EMAILS": "atronamir5@gmail.com,idogaldavid@gmail.com",
 		"RATE_LIMITING": "true",
-		"SHOPIFY_STORE_DOMAIN": "scxtax-ra.myshopify.com"
+		"SHOPIFY_STORE_DOMAIN": "scxtax-ra.myshopify.com",
+		"GOOGLE_PLAY_REPORT_BUCKET": "pubsite_prod_7397695133408217043"
 	}
 	/**
 	 * Static Assets

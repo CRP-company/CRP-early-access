@@ -91,5 +91,11 @@ assert.ok(js.includes('checkShopifyOAuthCallback'), "Missing checkShopifyOAuthCa
 assert.ok(js.includes('shopify') && js.includes('connected'), "Missing shopify=connected parameter handling");
 pass("Shopify OAuth connect button, endpoint handler, and callback return detection verified");
 
+// 11. Google Play Integration Actions
+assert.ok(html.includes('id="btn-sync-play"'), "Missing Sync Google Play button in index.html");
+assert.ok(js.includes('btn-sync-play'), "Missing Sync Google Play event listener in financial.js");
+assert.ok(js.includes('/financial/play/sync'), "Missing /financial/play/sync endpoint invocation in financial.js");
+pass("Google Play sync button, event listener, and endpoint invocation verified");
+
 console.log(`\nALL ${passed} UI & INTEGRITY CHECKS PASSED.`);
 

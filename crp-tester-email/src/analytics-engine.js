@@ -112,10 +112,20 @@ export function calculateAggregatedRetention(cohorts = []) {
 /**
  * Process a daily Google Play installation report entry.
  *
+ * Distinguishes:
+ * - `firstTimeInstalls`: Daily new acquisitions ("Daily Device Installs").
+ * - `installsOnActiveDevices`: Active devices turned on within 30 days ("Installs on active devices").
+ *   Mapped to `activeDeviceInstalls` for dashboard compatibility.
+ * - `currentDeviceInstalls`: Cumulative installed base on devices where not uninstalled ("Current Device Installs").
+ *   Kept strictly separate from `installsOnActiveDevices`.
+ * - User metrics: `dailyUserInstalls`, `dailyUserUninstalls`, `totalUserInstalls` kept separate.
+ *
  * @param {object} input
  * @param {string} input.date YYYY-MM-DD
  * @param {number} input.firstTimeInstalls
  * @param {number} [input.activeDeviceInstalls]
+ * @param {number} [input.installsOnActiveDevices]
+ * @param {number} [input.currentDeviceInstalls]
  * @param {number} [input.uninstalls]
  * @param {number} [input.reinstalls]
  * @param {string} [input.source]
@@ -123,48 +133,76 @@ export function calculateAggregatedRetention(cohorts = []) {
  */
 export function buildInstallationRecord(input) {
   const date = String(input.date || "").trim();
-  const firstTimeInstalls = Math.max(0, Number(input.firstTimeInstalls) || 0);
-  const activeDeviceInstalls = Math.max(0, Number(input.activeDeviceInstalls) || 0);
+  const firstTimeInstalls = Math.max(0, Number(input.firstTimeInstalls ?? input.dailyDeviceInstalls) || 0);
+  const installsOnActiveDevices = Math.max(
+    0,
+    Number(input.installsOnActiveDevices ?? input.activeDeviceInstalls) || 0,
+  );
+  const currentDeviceInstalls = Math.max(0, Number(input.currentDeviceInstalls) || 0);
   const uninstalls = Math.max(0, Number(input.uninstalls) || 0);
   const reinstalls = Math.max(0, Number(input.reinstalls) || 0);
   const netDeviceInstalls = firstTimeInstalls + reinstalls - uninstalls;
 
-  return {
+  const record = {
     date,
     firstTimeInstalls,
-    activeDeviceInstalls,
+    activeDeviceInstalls: installsOnActiveDevices, // Map dashboard active-device metric to actual "Installs on active devices"
+    installsOnActiveDevices,
+    currentDeviceInstalls,
     uninstalls,
     reinstalls,
     netDeviceInstalls,
     source: input.source || "google_play_console",
     updatedAt: new Date().toISOString(),
   };
+
+  if (input.dailyUserInstalls !== undefined) {
+    record.dailyUserInstalls = Math.max(0, Number(input.dailyUserInstalls) || 0);
+  }
+  if (input.dailyUserUninstalls !== undefined) {
+    record.dailyUserUninstalls = Math.max(0, Number(input.dailyUserUninstalls) || 0);
+  }
+  if (input.totalUserInstalls !== undefined) {
+    record.totalUserInstalls = Math.max(0, Number(input.totalUserInstalls) || 0);
+  }
+  if (input.installEvents !== undefined) {
+    record.installEvents = Math.max(0, Number(input.installEvents) || 0);
+  }
+
+  return record;
 }
 
 /**
  * Aggregate total Google Play installations and generate chart trend.
  *
  * @param {Array<object>} installations List of daily installation records
- * @returns {{totalInstalls: number, currentActiveDevices: number, dailyTrend: Array<object>}}
+ * @returns {{totalInstalls: number, currentActiveDevices: number, currentDeviceInstalls: number, dailyTrend: Array<object>}}
  */
 export function aggregateInstallationMetrics(installations = []) {
   const sorted = [...installations].sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
   let totalInstalls = 0;
   let latestActiveDevices = 0;
+  let latestCurrentDeviceInstalls = 0;
 
   const dailyTrend = [];
 
   for (const item of sorted) {
     totalInstalls += Number(item.firstTimeInstalls) || 0;
-    if (item.activeDeviceInstalls) {
-      latestActiveDevices = Number(item.activeDeviceInstalls);
+    const activeVal = item.installsOnActiveDevices !== undefined ? item.installsOnActiveDevices : item.activeDeviceInstalls;
+    if (activeVal) {
+      latestActiveDevices = Number(activeVal);
+    }
+    if (item.currentDeviceInstalls) {
+      latestCurrentDeviceInstalls = Number(item.currentDeviceInstalls);
     }
 
     dailyTrend.push({
       date: item.date,
       firstTimeInstalls: Number(item.firstTimeInstalls) || 0,
-      activeDevices: Number(item.activeDeviceInstalls) || 0,
+      activeDevices: Number(activeVal) || 0,
+      installsOnActiveDevices: Number(activeVal) || 0,
+      currentDeviceInstalls: Number(item.currentDeviceInstalls) || 0,
       uninstalls: Number(item.uninstalls) || 0,
     });
   }
@@ -172,6 +210,7 @@ export function aggregateInstallationMetrics(installations = []) {
   return {
     totalInstalls,
     currentActiveDevices: latestActiveDevices,
+    currentDeviceInstalls: latestCurrentDeviceInstalls,
     dailyTrend,
   };
 }

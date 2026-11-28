@@ -12,7 +12,7 @@
  * These tests assert the URL that is built, because that is where the bug was.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createFirestore, encodeFields } from "../src/firestore-rest.js";
+import { createFirestore, encodeFields, decodeFields } from "../src/firestore-rest.js";
 import * as oauth from "../src/oauth.js";
 
 const SECRET = JSON.stringify({
@@ -111,6 +111,154 @@ describe("createDocument is unchanged", () => {
 
     const url = new URL(calls[0].url);
     expect(url.searchParams.get("currentDocument.exists")).toBe("false");
+  });
+});
+
+describe("upsertDocument", () => {
+  it("performs an unconditional upsert in a single PATCH request without currentDocument.exists", async () => {
+    calls = [];
+    stub();
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await store.upsertDocument("analytics/installations", "2026-11-20", {
+      firstTimeInstalls: 25,
+      activeDeviceInstalls: 150,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.method).toBe("PATCH");
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get("currentDocument.exists")).toBeNull();
+    expect(url.searchParams.getAll("updateMask.fieldPaths").sort()).toEqual([
+      "activeDeviceInstalls",
+      "firstTimeInstalls",
+    ]);
+
+    const body = JSON.parse(calls[0].init.body);
+    expect(body.fields.firstTimeInstalls.integerValue).toBe("25");
+    expect(body.fields.activeDeviceInstalls.integerValue).toBe("150");
+  });
+
+  it("updates existing documents in one request without requiring create-then-update 409 fallback", async () => {
+    calls = [];
+    stub();
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    const ok = await store.upsertDocument("analytics/installations", "2026-11-20", {
+      firstTimeInstalls: 30,
+    });
+    expect(ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.method).toBe("PATCH");
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get("currentDocument.exists")).toBeNull();
+  });
+
+  it("does not accidentally delete unrelated fields because updateMask is explicitly passed", async () => {
+    calls = [];
+    const simulatedFirestoreDoc = {
+      retainedField: "must_not_be_wiped",
+      customMetadata: "keep_me",
+      firstTimeInstalls: 10,
+    };
+
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async (url, init) => {
+      calls.push({ url: String(url), init });
+      const u = new URL(String(url));
+      const mask = u.searchParams.getAll("updateMask.fieldPaths");
+      const body = JSON.parse(init.body || "{}");
+      const decodedPatch = decodeFields(body.fields || {});
+
+      // Simulate official Firestore server update mask behavior:
+      // Only fields present in updateMask are updated; others are retained!
+      for (const field of mask) {
+        if (decodedPatch[field] !== undefined) {
+          simulatedFirestoreDoc[field] = decodedPatch[field];
+        }
+      }
+
+      return new Response(JSON.stringify({ fields: encodeFields(simulatedFirestoreDoc) }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await store.upsertDocument("analytics/installations", "2026-11-20", {
+      firstTimeInstalls: 45,
+    });
+
+    expect(calls).toHaveLength(1);
+    // Verified: unrelated fields were preserved by Firestore updateMask
+    expect(simulatedFirestoreDoc.retainedField).toBe("must_not_be_wiped");
+    expect(simulatedFirestoreDoc.customMetadata).toBe("keep_me");
+    expect(simulatedFirestoreDoc.firstTimeInstalls).toBe(45);
+  });
+
+  it("update mask correctly covers every field in Google Play daily installation records", async () => {
+    calls = [];
+    stub();
+    const dailyRecord = {
+      date: "2026-11-20",
+      firstTimeInstalls: 40,
+      activeDeviceInstalls: 1200,
+      uninstalls: 5,
+      reinstalls: 0,
+      netDeviceInstalls: 35,
+      dailyUserInstalls: 38,
+      dailyUserUninstalls: 4,
+      installEvents: 42,
+      source: "google_play_bulk_report",
+      updatedAt: "2026-11-20T12:00:00.000Z",
+    };
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await store.upsertDocument("analytics/installations", "2026-11-20", dailyRecord);
+
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url);
+    const sentMask = url.searchParams.getAll("updateMask.fieldPaths").sort();
+    const expectedFields = Object.keys(dailyRecord).sort();
+    expect(sentMask).toEqual(expectedFields);
+  });
+
+  it("update mask covers every field in Google Play sync status and omits lastSuccessfulSync on failure", async () => {
+    calls = [];
+    stub();
+    const failedStatus = {
+      syncStatus: "failed",
+      lastAttemptedSync: "2026-11-27T12:00:00.000Z",
+      lastError: "GCS download timeout",
+      bucket: "pubsite_prod_123",
+      packageName: "com.crp.focus",
+      filesDiscovered: 1,
+      filesProcessed: 0,
+      recordsImported: 0,
+    };
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await store.upsertDocument("analytics/syncStatus", "google_play", failedStatus);
+
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url);
+    const sentMask = url.searchParams.getAll("updateMask.fieldPaths");
+
+    // lastSuccessfulSync MUST NOT be in updateMask on failure!
+    expect(sentMask).not.toContain("lastSuccessfulSync");
+    expect(sentMask).toContain("syncStatus");
+    expect(sentMask).toContain("lastError");
+  });
+
+  it("throws clear error when upsert HTTP response is non-200", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response("Permission Denied", { status: 403 });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(
+      store.upsertDocument("analytics/installations", "2026-11-20", { firstTimeInstalls: 10 }),
+    ).rejects.toThrow(/upsert analytics\/installations\/2026-11-20 failed \(403\)/);
   });
 });
 
@@ -349,5 +497,130 @@ describe("encodeFields", () => {
 
   it("skips undefined so a mask entry never carries no value", () => {
     expect(encodeFields({ a: 1, b: undefined })).toEqual({ a: { integerValue: "1" } });
+  });
+});
+
+describe("listCollection missing collection handling and error guards", () => {
+  it("returns [] when Firestore returns 404 NOT_FOUND for an uncreated collection/subcollection", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 404,
+            message: 'Document "projects/crp-cuby-display/databases/(default)/documents/financials/transactions" not found.',
+            status: "NOT_FOUND",
+          },
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    const result = await store.listCollection("financials/transactions");
+    expect(result).toEqual([]);
+  });
+
+  it("throws on authentication failure (401)", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.listCollection("financials/transactions")).rejects.toThrow(
+      /Firestore list failed \(401\)/,
+    );
+  });
+
+  it("throws on permission failure (403)", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response(JSON.stringify({ error: "Forbidden" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.listCollection("financials/transactions")).rejects.toThrow(
+      /Firestore list failed \(403\)/,
+    );
+  });
+
+  it("throws on server error (500)", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response("Internal Server Error", { status: 500 });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.listCollection("financials/transactions")).rejects.toThrow(
+      /Firestore list failed \(500\)/,
+    );
+  });
+
+  it("throws on non-JSON 404 (e.g. gateway or edge proxy 404)", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response("<html><body>404 Not Found</body></html>", {
+        status: 404,
+        headers: { "Content-Type": "text/html" },
+      });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.listCollection("financials/transactions")).rejects.toThrow(
+      /Firestore list failed \(404\): non-JSON 404 response/,
+    );
+  });
+
+  it("throws on 404 with unexpected JSON format", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response(JSON.stringify({ error: { code: 404, status: "UNEXPECTED" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    await expect(store.listCollection("financials/transactions")).rejects.toThrow(
+      /Firestore list failed \(404\)/,
+    );
+  });
+
+  it("lists and decodes documents when collection exists", async () => {
+    calls = [];
+    vi.spyOn(oauth, "getAccessToken").mockResolvedValue("stub-token");
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          documents: [
+            {
+              name: `projects/crp-cuby-display/databases/(default)/documents/financials/transactions/tx_1`,
+              fields: encodeFields({ amount: 150, status: "paid" }),
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const store = createFirestore(SECRET, "crp-cuby-display");
+    const result = await store.listCollection("financials/transactions");
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("tx_1");
+    expect(result[0].amount).toBe(150);
+    expect(result[0].status).toBe("paid");
   });
 });
