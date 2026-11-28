@@ -41,7 +41,7 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 import { decideViaWorker, postToWorker } from "./worker-client.js";
 import { experienceCategoryDisplay } from "./experience-category.js";
-import { initFinancial } from "./financial.js";
+import { initFinancial } from "./financial.js?v=20261128";
 
 const els = {
   login: document.getElementById("login-view"),

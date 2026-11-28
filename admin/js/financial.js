@@ -910,7 +910,11 @@ export function updateTxPreview() {
   }
 }
 
-function openTransactionModal(type = "revenue", existing = null) {
+if (typeof window !== "undefined") {
+  window.updateTxPreview = updateTxPreview;
+}
+
+export function openTransactionModal(type = "revenue", existing = null) {
   const modal = document.getElementById("modal-transaction");
   const title = document.getElementById("modal-tx-title");
   const form = document.getElementById("tx-form");
@@ -968,6 +972,10 @@ function openTransactionModal(type = "revenue", existing = null) {
   updateTxPreview();
 
   modal.showModal();
+}
+
+if (typeof window !== "undefined") {
+  window.openTransactionModal = openTransactionModal;
 }
 
 async function handleTransactionSubmit(e) {

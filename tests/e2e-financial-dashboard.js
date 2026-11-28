@@ -167,7 +167,28 @@ pass("Google Play sync button, event listener, and endpoint invocation verified"
     listeners["btn-add-expense:click"]();
   }, "Clicking Add Expense button must not throw ReferenceError: updateTxPreview is not defined");
 
+  // Verify openTransactionModal runs for Edit Transaction
+  assert.doesNotThrow(() => {
+    mod.openTransactionModal("revenue", {
+      id: "tx_edit_test",
+      type: "revenue",
+      description: "CUBY Test",
+      amount: 500,
+      currency: "USD",
+      exchangeRate: 3.7,
+      category: "Hardware",
+      transactionDate: "2026-11-25",
+      status: "paid",
+    });
+  }, "Opening transaction modal for Edit must not throw ReferenceError: updateTxPreview is not defined");
+  assert.equal(elements["modal-tx-title"].textContent, "Edit Transaction");
+  assert.equal(elements["tx-form"].dataset.editId, "tx_edit_test");
+  assert.equal(elements["tx-ils-preview"].textContent, "Converts to ₪1,850.00 (@ 3.7 ILS/USD)");
+
   // Verify live preview reacts to ILS and foreign currency input
+  elements["tx-currency"].value = "ILS";
+  elements["tx-rate"].value = "1.0";
+  elements["tx-rate"].disabled = true;
   elements["tx-amount"].value = "100";
   listeners["tx-amount:input"]();
   assert.equal(elements["tx-ils-preview"].textContent, "Converts to ₪100.00");
